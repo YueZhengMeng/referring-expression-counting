@@ -33,7 +33,30 @@ print(f"Train: {len(train_loader.dataset)} | Val: {len(val_loader.dataset)} | Te
 """ model"""
 CONFIG_PATH = "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
 CHECKPOINT_PATH = "./groundingdino_swint_ogc.pth"
-model = load_model(CONFIG_PATH, CHECKPOINT_PATH)
+# model = load_model(CONFIG_PATH, CHECKPOINT_PATH)
+
+# Build a tiny model from scratch for debugging (skip large pretrained checkpoint)
+from groundingdino.models import build_model
+from groundingdino.util.slconfig import SLConfig
+
+args = SLConfig.fromfile(CONFIG_PATH)
+args.device = device
+# Drastically reduce model size to fit laptop GPU
+args.hidden_dim = 64
+args.dim_feedforward = 256
+args.enc_layers = 1
+args.dec_layers = 1
+args.num_queries = 10
+args.nheads = 4
+args.num_feature_levels = 1
+args.return_interm_indices = [3]
+args.two_stage_type = "no"
+args.use_checkpoint = False
+args.use_transformer_ckpt = False
+args.anno_path = "./anno/annotations.json"
+args.text_encoder_type = "F:/model/bert-base-uncased"  # use local BERT
+
+model = build_model(args)
 model = model.to(device)
 
 # freeze encoders
@@ -322,8 +345,15 @@ torch.save({"model": best_model.state_dict()}, model_name)
 
 # Inference on test set
 print(f"Inference on test set using best model: {model_name}")
-model = load_model(CONFIG_PATH, model_name)
+# load_model(CONFIG_PATH, model_name)
+
+# Rebuild tiny model and load saved weights
+from groundingdino.util.misc import clean_state_dict
+model = build_model(args)
+checkpoint = torch.load(model_name, map_location="cpu")
+model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
 model = model.to(device)
+model.eval()
 test_mae, test_rmse, test_TP, test_FP, test_FN, test_precision, test_recall, test_f1 = eval('test', -1)
 print(
     f"test MAE: {test_mae:5.2f}, RMSE: {test_rmse:5.2f}, TP: {test_TP}, FP: {test_FP}, FN: {test_FN}, precision: {test_precision:5.2f}, recall: {test_recall:5.2f}, f1: {test_f1:5.2f}")

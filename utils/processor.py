@@ -1,17 +1,14 @@
 import json
-import os
-
-DATA_ROOT = '/mnt/workstation/rec/images'  # update this to the path that contains 'rec-8k' folder
 
 
 class DataProcessor():
-    def __init__(self):
-        self.image_path = os.path.join(DATA_ROOT, 'rec-8k')
-
-        self.anno_file = 'anno/annotations.json'
+    def __init__(self, image_path='F:\\REC-8K\\rec-8k', anno_file_path='anno/annotations.json',
+                 split_file_path='anno/splits.json'):
+        # 实现自定义路径
+        self.image_path = image_path
+        self.anno_file = anno_file_path
         self.annotations = self.read_annotations()
-
-        self.split_file = 'anno/splits.json'
+        self.split_file = split_file_path
         self.splits = self.read_splits()
 
         print(f"annotation file: {self.anno_file}\nsplit file: {self.split_file}")

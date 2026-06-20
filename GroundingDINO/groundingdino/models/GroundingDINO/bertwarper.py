@@ -26,7 +26,28 @@ class BertModelWarper(nn.Module):
 
         self.get_extended_attention_mask = bert_model.get_extended_attention_mask
         self.invert_attention_mask = bert_model.invert_attention_mask
-        self.get_head_mask = bert_model.get_head_mask
+        # 用于兼容新版本 Transformers 库
+        if hasattr(bert_model, 'get_head_mask'):
+            self.get_head_mask = bert_model.get_head_mask
+        else:
+            self.get_head_mask = self._get_head_mask
+
+    @staticmethod
+    def _get_head_mask(head_mask, num_hidden_layers, is_attention_chunked=False):
+    # 用于兼容新版本 Transformers 库
+        if head_mask is not None:
+            if head_mask.dim() == 1:  # [num_heads]
+                head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+                head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
+            elif head_mask.dim() == 2:  # [num_hidden_layers, num_heads]
+                head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
+            # 验证是否成功转换为了 5D
+            assert head_mask.dim() == 5, f"head_mask.dim != 5, got {head_mask.dim()}"
+            if is_attention_chunked:
+                head_mask = head_mask.unsqueeze(-1)  # 用于分块注意力的额外维度
+        else:
+            head_mask = [None] * num_hidden_layers
+        return head_mask
 
     def forward(
         self,
@@ -107,7 +128,7 @@ class BertModelWarper(nn.Module):
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
         extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
-            attention_mask, input_shape, device
+            attention_mask, input_shape
         )
 
         # If a 2D or 3D attention mask is provided for the cross-attention

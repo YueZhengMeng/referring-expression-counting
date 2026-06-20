@@ -209,12 +209,12 @@ def _get_activation_fn(activation, d_model=256, batch_dim=0):
     raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
 
 
-def gen_sineembed_for_position(pos_tensor):
+def gen_sineembed_for_position(pos_tensor, num_pos_feats=128):
     # n_query, bs, _ = pos_tensor.size()
     # sineembed_tensor = torch.zeros(n_query, bs, 256)
     scale = 2 * math.pi
-    dim_t = torch.arange(128, dtype=torch.float32, device=pos_tensor.device)
-    dim_t = 10000 ** (2 * (torch.div(dim_t, 2, rounding_mode='floor')) / 128)
+    dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=pos_tensor.device)
+    dim_t = 10000 ** (2 * (torch.div(dim_t, 2, rounding_mode='floor')) / num_pos_feats)
     x_embed = pos_tensor[:, :, 0] * scale
     y_embed = pos_tensor[:, :, 1] * scale
     pos_x = x_embed[:, :, None] / dim_t

@@ -568,10 +568,10 @@ class TransformerEncoder(nn.Module):
                     .unsqueeze(-1)
                     .repeat(bs, 1, 1)
                 )
-                pos_text = get_sine_pos_embed(pos_text, num_pos_feats=256, exchange_xy=False)
+                pos_text = get_sine_pos_embed(pos_text, num_pos_feats=self.d_model, exchange_xy=False)
             if position_ids is not None:
                 pos_text = get_sine_pos_embed(
-                    position_ids[..., None], num_pos_feats=256, exchange_xy=False
+                    position_ids[..., None], num_pos_feats=self.d_model, exchange_xy=False
                 )
 
         # main process
@@ -706,7 +706,8 @@ class TransformerDecoder(nn.Module):
                 assert reference_points.shape[-1] == 2
                 reference_points_input = reference_points[:, :, None] * valid_ratios[None, :]
             query_sine_embed = gen_sineembed_for_position(
-                reference_points_input[:, :, 0, :]
+                reference_points_input[:, :, 0, :],
+                num_pos_feats=self.d_model // 2,
             )
 
             # conditional query

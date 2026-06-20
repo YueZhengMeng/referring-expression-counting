@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, BertModel, BertTokenizer, RobertaModel, RobertaTokenizerFast
+from transformers import AutoTokenizer, BertModel, RobertaModel, RobertaTokenizerFast
 
 
 def get_tokenlizer(text_encoder_type):
@@ -22,5 +22,10 @@ def get_pretrained_language_model(text_encoder_type):
     if text_encoder_type == "bert-base-uncased":
         return BertModel.from_pretrained(text_encoder_type)
     if text_encoder_type == "roberta-base":
+        return RobertaModel.from_pretrained(text_encoder_type)
+    # 兼容本地 bert 模型路径
+    if "bert-base-uncased" in text_encoder_type:
+        return BertModel.from_pretrained(text_encoder_type)
+    if "roberta-base" in text_encoder_type:
         return RobertaModel.from_pretrained(text_encoder_type)
     raise ValueError("Unknown text_encoder_type {}".format(text_encoder_type))
