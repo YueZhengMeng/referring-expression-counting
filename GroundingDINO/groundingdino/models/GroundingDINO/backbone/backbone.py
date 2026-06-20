@@ -24,8 +24,7 @@ import torchvision
 from torch import nn
 from torchvision.models._utils import IntermediateLayerGetter
 
-from groundingdino.util.misc import NestedTensor, clean_state_dict, is_main_process
-
+from groundingdino.util.misc import NestedTensor, is_main_process
 from .position_encoding import build_position_encoding
 from .swin_transformer import build_swin_transformer
 
@@ -47,7 +46,7 @@ class FrozenBatchNorm2d(torch.nn.Module):
         self.register_buffer("running_var", torch.ones(n))
 
     def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+            self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ):
         num_batches_tracked_key = prefix + "num_batches_tracked"
         if num_batches_tracked_key in state_dict:
@@ -72,19 +71,19 @@ class FrozenBatchNorm2d(torch.nn.Module):
 
 class BackboneBase(nn.Module):
     def __init__(
-        self,
-        backbone: nn.Module,
-        train_backbone: bool,
-        num_channels: int,
-        return_interm_indices: list,
+            self,
+            backbone: nn.Module,
+            train_backbone: bool,
+            num_channels: int,
+            return_interm_indices: list,
     ):
         super().__init__()
         for name, parameter in backbone.named_parameters():
             if (
-                not train_backbone
-                or "layer2" not in name
-                and "layer3" not in name
-                and "layer4" not in name
+                    not train_backbone
+                    or "layer2" not in name
+                    and "layer3" not in name
+                    and "layer4" not in name
             ):
                 parameter.requires_grad_(False)
 
@@ -120,12 +119,12 @@ class Backbone(BackboneBase):
     """ResNet backbone with frozen BatchNorm."""
 
     def __init__(
-        self,
-        name: str,
-        train_backbone: bool,
-        dilation: bool,
-        return_interm_indices: list,
-        batch_norm=FrozenBatchNorm2d,
+            self,
+            name: str,
+            train_backbone: bool,
+            dilation: bool,
+            return_interm_indices: list,
+            batch_norm=FrozenBatchNorm2d,
     ):
         if name in ["resnet18", "resnet34", "resnet50", "resnet101"]:
             backbone = getattr(torchvision.models, name)(
@@ -139,7 +138,7 @@ class Backbone(BackboneBase):
         assert name not in ("resnet18", "resnet34"), "Only resnet50 and resnet101 are available."
         assert return_interm_indices in [[0, 1, 2, 3], [1, 2, 3], [3]]
         num_channels_all = [256, 512, 1024, 2048]
-        num_channels = num_channels_all[4 - len(return_interm_indices) :]
+        num_channels = num_channels_all[4 - len(return_interm_indices):]
         super().__init__(backbone, train_backbone, num_channels, return_interm_indices)
 
 
@@ -184,11 +183,11 @@ def build_backbone(args):
             args.backbone,
             train_backbone,
             args.dilation,
-            return_interm_indices, # [1, 2, 3]
+            return_interm_indices,  # [1, 2, 3]
             batch_norm=FrozenBatchNorm2d,
         )
         bb_num_channels = backbone.num_channels
-    elif args.backbone in [ # is swin_T_224_1k
+    elif args.backbone in [  # is swin_T_224_1k
         "swin_T_224_1k",
         "swin_B_224_22k",
         "swin_B_384_22k",
@@ -204,7 +203,7 @@ def build_backbone(args):
             use_checkpoint=use_checkpoint,
         )
 
-        bb_num_channels = backbone.num_features[4 - len(return_interm_indices) :]
+        bb_num_channels = backbone.num_features[4 - len(return_interm_indices):]
     else:
         raise NotImplementedError("Unknown backbone {}".format(args.backbone))
 

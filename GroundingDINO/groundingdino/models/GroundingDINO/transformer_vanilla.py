@@ -17,16 +17,11 @@ Copy-paste from torch.nn.Transformer with modifications:
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .utils import (
-    MLP,
     _get_activation_fn,
     _get_clones,
-    gen_encoder_output_proposals,
-    gen_sineembed_for_position,
-    sigmoid_focal_loss,
 )
 
 
@@ -71,13 +66,13 @@ class TextTransformer(nn.Module):
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(
-        self,
-        d_model,
-        nhead,
-        dim_feedforward=2048,
-        dropout=0.1,
-        activation="relu",
-        normalize_before=False,
+            self,
+            d_model,
+            nhead,
+            dim_feedforward=2048,
+            dropout=0.1,
+            activation="relu",
+            normalize_before=False,
     ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
@@ -99,11 +94,11 @@ class TransformerEncoderLayer(nn.Module):
         return tensor if pos is None else tensor + pos
 
     def forward(
-        self,
-        src,
-        src_mask: Optional[Tensor] = None,
-        src_key_padding_mask: Optional[Tensor] = None,
-        pos: Optional[Tensor] = None,
+            self,
+            src,
+            src_mask: Optional[Tensor] = None,
+            src_key_padding_mask: Optional[Tensor] = None,
+            pos: Optional[Tensor] = None,
     ):
         # repeat attn mask
         if src_mask.dim() == 3 and src_mask.shape[0] == src.shape[1]:

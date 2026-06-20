@@ -82,7 +82,7 @@ class PositionEmbeddingSineHW(nn.Module):
     """
 
     def __init__(
-        self, num_pos_feats=64, temperatureH=10000, temperatureW=10000, normalize=False, scale=None
+            self, num_pos_feats=64, temperatureH=10000, temperatureW=10000, normalize=False, scale=None
     ):
         super().__init__()
         self.num_pos_feats = num_pos_feats

@@ -6,11 +6,7 @@
 # ------------------------------------------------------------------------
 
 import torch
-import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
-from torch import Tensor, nn
-from torchvision.ops.boxes import nms
-from transformers import BertConfig, BertModel, BertPreTrainedModel
+from torch import nn
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 
 
@@ -34,7 +30,7 @@ class BertModelWarper(nn.Module):
 
     @staticmethod
     def _get_head_mask(head_mask, num_hidden_layers, is_attention_chunked=False):
-    # 用于兼容新版本 Transformers 库
+        # 用于兼容新版本 Transformers 库
         if head_mask is not None:
             if head_mask.dim() == 1:  # [num_heads]
                 head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
@@ -50,20 +46,20 @@ class BertModelWarper(nn.Module):
         return head_mask
 
     def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_values=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
+            self,
+            input_ids=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            past_key_values=None,
+            use_cache=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
     ):
         r"""
         encoder_hidden_states  (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
@@ -228,8 +224,8 @@ def generate_masks_with_special_tokens(tokenized, special_tokens_list, tokenizer
             attention_mask[row, col, col] = True
             position_ids[row, col] = 0
         else:
-            attention_mask[row, previous_col + 1 : col + 1, previous_col + 1 : col + 1] = True
-            position_ids[row, previous_col + 1 : col + 1] = torch.arange(
+            attention_mask[row, previous_col + 1: col + 1, previous_col + 1: col + 1] = True
+            position_ids[row, previous_col + 1: col + 1] = torch.arange(
                 0, col - previous_col, device=input_ids.device
             )
 
@@ -273,12 +269,12 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
             attention_mask[row, col, col] = True
             position_ids[row, col] = 0
         else:
-            attention_mask[row, previous_col + 1 : col + 1, previous_col + 1 : col + 1] = True
-            position_ids[row, previous_col + 1 : col + 1] = torch.arange(
+            attention_mask[row, previous_col + 1: col + 1, previous_col + 1: col + 1] = True
+            position_ids[row, previous_col + 1: col + 1] = torch.arange(
                 0, col - previous_col, device=input_ids.device
             )
             c2t_maski = torch.zeros((num_token), device=input_ids.device).bool()
-            c2t_maski[previous_col + 1 : col] = True
+            c2t_maski[previous_col + 1: col] = True
             cate_to_token_mask_list[row].append(c2t_maski)
         previous_col = col
 

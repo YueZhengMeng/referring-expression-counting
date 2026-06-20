@@ -19,7 +19,6 @@ from typing import List, Optional
 import numpy as np
 import torch
 import torch.distributed as dist
-
 # needed due to empty tensor bug in pytorch and torchvision 0.5
 import torchvision
 from torch import Tensor

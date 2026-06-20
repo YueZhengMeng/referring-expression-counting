@@ -9,7 +9,6 @@
 import datetime
 import os
 
-import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -20,7 +19,7 @@ from pycocotools import mask as maskUtils
 
 
 def renorm(
-    img: torch.FloatTensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        img: torch.FloatTensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
 ) -> torch.FloatTensor:
     # img: tensor(3,H,W) or tensor(B,3,H,W)
     # return: same as img
@@ -173,7 +172,7 @@ class COCOVisualizer:
 
         if "strings_positive" in tgt and len(tgt["strings_positive"]) > 0:
             assert (
-                len(tgt["strings_positive"]) == numbox
+                    len(tgt["strings_positive"]) == numbox
             ), f"{len(tgt['strings_positive'])} = {numbox}, "
             for idx, strlist in enumerate(tgt["strings_positive"]):
                 cate_id = int(tgt["labels"][idx])

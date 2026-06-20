@@ -1,9 +1,9 @@
 import os
 
 import torch
-from groundingdino.util.base_api import load_image, preprocess_caption
 from torch.utils.data import Dataset, DataLoader
 
+from groundingdino.util.base_api import load_image, preprocess_caption
 from utils.processor import DataProcessor
 
 

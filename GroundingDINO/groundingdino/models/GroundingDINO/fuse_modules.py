@@ -107,7 +107,7 @@ class BiMultiHeadAttention(nn.Module):
         self.l_dim = l_dim
 
         assert (
-            self.head_dim * self.num_heads == self.embed_dim
+                self.head_dim * self.num_heads == self.embed_dim
         ), f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`: {self.num_heads})."
         self.scale = self.head_dim ** (-0.5)
         self.dropout = dropout
@@ -251,15 +251,15 @@ class BiMultiHeadAttention(nn.Module):
 # Bi-Direction MHA (text->image, image->text)
 class BiAttentionBlock(nn.Module):
     def __init__(
-        self,
-        v_dim,
-        l_dim,
-        embed_dim,
-        num_heads,
-        dropout=0.1,
-        drop_path=0.0,
-        init_values=1e-4,
-        cfg=None,
+            self,
+            v_dim,
+            l_dim,
+            embed_dim,
+            num_heads,
+            dropout=0.1,
+            drop_path=0.0,
+            init_values=1e-4,
+            cfg=None,
     ):
         """
         Inputs:

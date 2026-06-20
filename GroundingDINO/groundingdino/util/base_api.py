@@ -46,35 +46,33 @@ def threshold(
         outputs,
         captions: str,
         tokenizer,
-        text_threshold: float): 
-
+        text_threshold: float):
     bs = outputs["pred_logits"].shape[0]
 
     ret = []
     for b in range(bs):
-        prediction_logits = outputs["pred_logits"].cpu().sigmoid()[b]  
-        prediction_boxes = outputs["pred_boxes"].cpu()[b]  
+        prediction_logits = outputs["pred_logits"].cpu().sigmoid()[b]
+        prediction_boxes = outputs["pred_boxes"].cpu()[b]
 
         tokenized = tokenizer(captions[b])
         input_ids = tokenized['input_ids']
-        end_idx = np.where(np.array(input_ids)==1012)[0][-1]
-        
+        end_idx = np.where(np.array(input_ids) == 1012)[0][-1]
+
         # find mask index where all the valid tokens are above the threshold
         threshold1 = 0.25
         threshold2 = 0.35
         # for global context
         mask1 = prediction_logits[:, 0].gt(threshold1)
         # for local context
-        mask2 = prediction_logits[:, 1:end_idx].gt(threshold2).all(dim=1) 
+        mask2 = prediction_logits[:, 1:end_idx].gt(threshold2).all(dim=1)
         mask = mask1 & mask2
 
-        logits = prediction_logits[mask]  
-        boxes = prediction_boxes[mask]  
+        logits = prediction_logits[mask]
+        boxes = prediction_boxes[mask]
 
-
-        phrases = [ 
+        phrases = [
             get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace('.', '')
-            for logit 
+            for logit
             in logits
         ]
         ret.append((boxes, logits.max(dim=1)[0], phrases))

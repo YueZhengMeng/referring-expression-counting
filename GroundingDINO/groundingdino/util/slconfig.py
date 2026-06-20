@@ -3,12 +3,12 @@
 # ==========================================================
 import ast
 import os.path as osp
+import platform
 import shutil
 import sys
 import tempfile
 from argparse import Action
 from importlib import import_module
-import platform
 
 from addict import Dict
 from yapf.yapflib.yapf_api import FormatCode

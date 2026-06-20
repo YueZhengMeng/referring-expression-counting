@@ -6,7 +6,7 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 
 sys.path.append('GroundingDINO')
-from groundingdino.util.base_api import load_model, threshold
+from groundingdino.util.base_api import threshold
 import os
 import numpy as np
 
@@ -151,7 +151,7 @@ def train(epoch):
     train_precision = train_tp / (train_tp + train_fp) if train_tp + train_fp != 0 else 0.0
     train_recall = train_tp / (train_tp + train_fn) if train_tp + train_fn != 0 else 0.0
     train_f1 = 2 * train_precision * train_recall / (
-                train_precision + train_recall) if train_precision + train_recall != 0 else 0.0
+            train_precision + train_recall) if train_precision + train_recall != 0 else 0.0
 
     return train_mae, train_rmse, train_tp, train_fp, train_fn, train_precision, train_recall, train_f1
 
@@ -224,7 +224,7 @@ def eval(split, epoch=None):
     eval_precision = eval_tp / (eval_tp + eval_fp) if eval_tp + eval_fp != 0 else 0.0
     eval_recall = eval_tp / (eval_tp + eval_fn) if eval_tp + eval_fn != 0 else 0.0
     eval_f1 = 2 * eval_precision * eval_recall / (
-                eval_precision + eval_recall) if eval_precision + eval_recall != 0 else 0.0
+            eval_precision + eval_recall) if eval_precision + eval_recall != 0 else 0.0
 
     return eval_mae, eval_rmse, eval_tp, eval_fp, eval_fn, eval_precision, eval_recall, eval_f1
 
@@ -349,6 +349,7 @@ print(f"Inference on test set using best model: {model_name}")
 
 # Rebuild tiny model and load saved weights
 from groundingdino.util.misc import clean_state_dict
+
 model = build_model(args)
 checkpoint = torch.load(model_name, map_location="cpu")
 model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)

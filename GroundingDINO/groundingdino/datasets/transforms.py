@@ -38,7 +38,7 @@ def crop(image, target, region):
 
     if "masks" in target:
         # FIXME should we update the area here if there are no boxes?
-        target["masks"] = target["masks"][:, i : i + h, j : j + w]
+        target["masks"] = target["masks"][:, i: i + h, j: j + w]
         fields.append("masks")
 
     # remove elements for which the boxes or masks that have zero area
@@ -140,7 +140,7 @@ def resize(image, target, size, max_size=None):
 
     if "masks" in target:
         target["masks"] = (
-            interpolate(target["masks"][:, None].float(), size, mode="nearest")[:, 0] > 0.5
+                interpolate(target["masks"][:, None].float(), size, mode="nearest")[:, 0] > 0.5
         )
 
     return rescaled_image, target
@@ -193,9 +193,9 @@ class RandomSizeCrop(object):
             region = T.RandomCrop.get_params(img, [h, w])
             result_img, result_target = crop(img, target, region)
             if (
-                not self.respect_boxes
-                or len(result_target["boxes"]) == init_boxes
-                or i == max_patience - 1
+                    not self.respect_boxes
+                    or len(result_target["boxes"]) == init_boxes
+                    or i == max_patience - 1
             ):
                 return result_img, result_target
         return result_img, result_target

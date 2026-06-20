@@ -36,7 +36,7 @@ def clean_state_dict(state_dict):
 
 
 def renorm(
-    img: torch.FloatTensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        img: torch.FloatTensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
 ) -> torch.FloatTensor:
     # img: tensor(3,H,W) or tensor(B,3,H,W)
     # return: same as img
@@ -238,7 +238,7 @@ class Embedder:
         if self.kwargs["log_sampling"]:
             freq_bands = 2.0 ** torch.linspace(0.0, max_freq, steps=N_freqs)
         else:
-            freq_bands = torch.linspace(2.0**0.0, 2.0**max_freq, steps=N_freqs)
+            freq_bands = torch.linspace(2.0 ** 0.0, 2.0 ** max_freq, steps=N_freqs)
 
         for freq in freq_bands:
             for p_fn in self.kwargs["periodic_fns"]:
@@ -487,7 +487,7 @@ class ModelEma(torch.nn.Module):
     def _update(self, model, update_fn):
         with torch.no_grad():
             for ema_v, model_v in zip(
-                self.module.state_dict().values(), model.state_dict().values()
+                    self.module.state_dict().values(), model.state_dict().values()
             ):
                 if self.device is not None:
                     model_v = model_v.to(device=self.device)
@@ -597,12 +597,12 @@ def targets_to(targets: List[Dict[str, Any]], device):
 
 
 def get_phrases_from_posmap(
-    posmap: torch.BoolTensor, tokenized: Dict, tokenizer: AutoTokenizer
+        posmap: torch.BoolTensor, tokenized: Dict, tokenizer: AutoTokenizer
 ):
     assert isinstance(posmap, torch.Tensor), "posmap must be torch.Tensor"
     if posmap.dim() == 1:
         non_zero_idx = posmap.nonzero(as_tuple=True)[0].tolist()
-        token_ids = [tokenized["input_ids"][i] for i in non_zero_idx if i<len(tokenized["input_ids"])]
+        token_ids = [tokenized["input_ids"][i] for i in non_zero_idx if i < len(tokenized["input_ids"])]
         return tokenizer.decode(token_ids)
     else:
         raise NotImplementedError("posmap must be 1-dim")

@@ -15,8 +15,9 @@
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
 # ------------------------------------------------------------------------
 import copy
-from typing import List
 import json
+from typing import List
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -24,55 +25,46 @@ from torch import nn
 from groundingdino.util import get_tokenlizer
 from groundingdino.util.misc import (
     NestedTensor,
-    accuracy,
-    get_world_size,
-    interpolate,
     inverse_sigmoid,
-    is_dist_avail_and_initialized,
     nested_tensor_from_tensor_list,
 )
-from groundingdino.util.utils import get_phrases_from_posmap
-from groundingdino.util.visualizer import COCOVisualizer
-from groundingdino.util.vl_utils import create_positive_map_from_span
-
-from ..registry import MODULE_BUILD_FUNCS
 from .backbone import build_backbone
 from .bertwarper import (
     BertModelWarper,
-    generate_masks_with_special_tokens,
     generate_masks_with_special_tokens_and_transfer_map,
 )
 from .transformer import build_transformer
 from .utils import MLP, ContrastiveEmbed
+from ..registry import MODULE_BUILD_FUNCS
 
 
 class GroundingDINO(nn.Module):
     """This is the Cross-Attention Detector module that performs object detection"""
 
     def __init__(
-        self,
-        backbone,
-        transformer,
-        num_queries,
-        aux_loss=False,
-        iter_update=False,
-        query_dim=2,
-        num_feature_levels=1,
-        nheads=8,
-        # two stage
-        two_stage_type="no", 
-        dec_pred_bbox_embed_share=True,
-        two_stage_class_embed_share=True,
-        two_stage_bbox_embed_share=True,
-        num_patterns=0,
-        dn_number=100,
-        dn_box_noise_scale=0.4,
-        dn_label_noise_ratio=0.5,
-        dn_labelbook_size=100,
-        text_encoder_type="bert-base-uncased",
-        sub_sentence_present=True,
-        max_text_len=256,
-        anno_path=None,
+            self,
+            backbone,
+            transformer,
+            num_queries,
+            aux_loss=False,
+            iter_update=False,
+            query_dim=2,
+            num_feature_levels=1,
+            nheads=8,
+            # two stage
+            two_stage_type="no",
+            dec_pred_bbox_embed_share=True,
+            two_stage_class_embed_share=True,
+            two_stage_bbox_embed_share=True,
+            num_patterns=0,
+            dn_number=100,
+            dn_box_noise_scale=0.4,
+            dn_label_noise_ratio=0.5,
+            dn_labelbook_size=100,
+            text_encoder_type="bert-base-uncased",
+            sub_sentence_present=True,
+            max_text_len=256,
+            anno_path=None,
     ):
         """Initializes the model.
         Parameters:
@@ -84,7 +76,7 @@ class GroundingDINO(nn.Module):
         """
         if anno_path:
             with open(anno_path, "r") as f:
-                anno= json.load(f)
+                anno = json.load(f)
                 # keep unique cap
                 self.anno = {}
                 for img, caps in anno.items():
@@ -93,7 +85,7 @@ class GroundingDINO(nn.Module):
                             # delete points from items dict
                             items.pop('points', None)
                             self.anno[cap] = items
-                
+
         super().__init__()
         self.num_queries = num_queries
         self.transformer = transformer
@@ -241,24 +233,22 @@ class GroundingDINO(nn.Module):
             captions = [t["caption"] for t in targets]
         len(captions)
 
-
         # split captions to subject and context
-        subjects, contexts, attributes = [],[],[]
+        subjects, contexts, attributes = [], [], []
         for caption in captions:
-            subject, context, att = split_caption(caption, self.anno) 
-            subjects.append(subject) # ['blue box.', 'yellow box.', '...', '...']
-            contexts.append(context) # ['on table.', 'on ground.', '...', '...']
-            attributes.append(att) # ['blue.','yellow.', '...', '...']
+            subject, context, att = split_caption(caption, self.anno)
+            subjects.append(subject)  # ['blue box.', 'yellow box.', '...', '...']
+            contexts.append(context)  # ['on table.', 'on ground.', '...', '...']
+            attributes.append(att)  # ['blue.','yellow.', '...', '...']
 
         tokenized_subject = self.tokenizer(subjects, padding="longest", return_tensors="pt").to(samples.device)
         tokenized_context = self.tokenizer(contexts, padding="longest", return_tensors="pt").to(samples.device)
 
         tokenized_attribute = self.tokenizer(attributes, padding="longest", return_tensors="pt").to(samples.device)
 
-
         # encoder texts
         tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt").to(samples.device)
-        
+
         (
             text_self_attention_masks,
             position_ids,
@@ -285,19 +275,21 @@ class GroundingDINO(nn.Module):
             # import ipdb; ipdb.set_trace()
             tokenized_for_encoder = tokenized
 
-        bert_output = self.bert(**tokenized_for_encoder)  
+        bert_output = self.bert(**tokenized_for_encoder)
 
-        encoded_text = self.feat_map(bert_output["last_hidden_state"]) 
-        text_token_mask = tokenized.attention_mask.bool()  
-                
-                
-        mask = tokenized["attention_mask"].bool() 
-        attr_mask = tokenized["attention_mask"].bool() 
+        encoded_text = self.feat_map(bert_output["last_hidden_state"])
+        text_token_mask = tokenized.attention_mask.bool()
 
-        text_subject_mask = (tokenized["input_ids"].unsqueeze(2) == tokenized_subject["input_ids"].unsqueeze(1)).any(dim=2) & mask
-        text_context_mask = (tokenized["input_ids"].unsqueeze(2) == tokenized_context["input_ids"].unsqueeze(1)).any(dim=2) & mask
-        text_attribute_mask = (tokenized["input_ids"].unsqueeze(2) == tokenized_attribute["input_ids"].unsqueeze(1)).any(dim=2) & attr_mask
-        
+        mask = tokenized["attention_mask"].bool()
+        attr_mask = tokenized["attention_mask"].bool()
+
+        text_subject_mask = (tokenized["input_ids"].unsqueeze(2) == tokenized_subject["input_ids"].unsqueeze(1)).any(
+            dim=2) & mask
+        text_context_mask = (tokenized["input_ids"].unsqueeze(2) == tokenized_context["input_ids"].unsqueeze(1)).any(
+            dim=2) & mask
+        text_attribute_mask = (tokenized["input_ids"].unsqueeze(2) == tokenized_attribute["input_ids"].unsqueeze(
+            1)).any(dim=2) & attr_mask
+
         if encoded_text.shape[1] > self.max_text_len:
             encoded_text = encoded_text[:, : self.max_text_len, :]
             text_token_mask = text_token_mask[:, : self.max_text_len]
@@ -305,24 +297,24 @@ class GroundingDINO(nn.Module):
             text_subject_mask = text_subject_mask[:, : self.max_text_len]
             text_context_mask = text_context_mask[:, : self.max_text_len]
             text_attribute_mask = text_attribute_mask[:, : self.max_text_len]
-            
+
             position_ids = position_ids[:, : self.max_text_len]
             text_self_attention_masks = text_self_attention_masks[
                 :, : self.max_text_len, : self.max_text_len
             ]
 
         text_dict = {
-            "encoded_text": encoded_text,  
-            "text_token_mask": text_token_mask,  
-            "position_ids": position_ids,  
-            "text_self_attention_masks": text_self_attention_masks, 
+            "encoded_text": encoded_text,
+            "text_token_mask": text_token_mask,
+            "position_ids": position_ids,
+            "text_self_attention_masks": text_self_attention_masks,
             "text_subject_mask": text_subject_mask,
             "text_context_mask": text_context_mask,
             "text_attribute_mask": text_attribute_mask,
         }
 
         # import ipdb; ipdb.set_trace()
-        
+
         # encoder images
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
@@ -334,11 +326,11 @@ class GroundingDINO(nn.Module):
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
-        if self.num_feature_levels > len(srcs): 
-            _len_srcs = len(srcs) 
+        if self.num_feature_levels > len(srcs):
+            _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
-                if l == _len_srcs: 
-                    src = self.input_proj[l](features[-1].tensors) 
+                if l == _len_srcs:
+                    src = self.input_proj[l](features[-1].tensors)
                 else:
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
@@ -349,14 +341,14 @@ class GroundingDINO(nn.Module):
                 poss.append(pos_l)
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
-        hs, reference, hs_enc, ref_enc, init_box_proposal, img_embs, txt_embs = self.transformer( 
+        hs, reference, hs_enc, ref_enc, init_box_proposal, img_embs, txt_embs = self.transformer(
             srcs, masks, input_query_bbox, poss, input_query_label, attn_mask, text_dict
-        ) 
+        )
 
         # deformable-detr-like anchor update
         outputs_coord_list = []
         for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(
-            zip(reference[:-1], self.bbox_embed, hs)
+                zip(reference[:-1], self.bbox_embed, hs)
         ):
             layer_delta_unsig = layer_bbox_embed(layer_hs)
             layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
@@ -365,16 +357,17 @@ class GroundingDINO(nn.Module):
         outputs_coord_list = torch.stack(outputs_coord_list)
 
         # output
-        outputs_class = torch.stack( 
+        outputs_class = torch.stack(
             [
-                layer_cls_embed(layer_hs, text_dict) 
-                for layer_cls_embed, layer_hs in zip(self.class_embed, hs) 
+                layer_cls_embed(layer_hs, text_dict)
+                for layer_cls_embed, layer_hs in zip(self.class_embed, hs)
             ]
         )
 
-        token_masks = text_dict["text_attribute_mask"] 
-        out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1], "img_embs": hs[-1], "txt_embs": txt_embs, "token_masks": token_masks} 
-        
+        token_masks = text_dict["text_attribute_mask"]
+        out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1], "img_embs": hs[-1],
+               "txt_embs": txt_embs, "token_masks": token_masks}
+
         return out
 
     @torch.jit.unused
@@ -390,21 +383,21 @@ class GroundingDINO(nn.Module):
 
 def split_caption(caption, anno=None):
     if anno is not None:
-        found = [(cap, items['type'], items['class'], items['attribute']) for cap, items in anno.items() if cap.lower()+'.' == caption.lower()]
+        found = [(cap, items['type'], items['class'], items['attribute']) for cap, items in anno.items() if
+                 cap.lower() + '.' == caption.lower()]
         if found:
             cap, typ, cls, att = found[0]
             if typ == 'location':
-                return cls + '.', att + '.', att+ '.'
+                return cls + '.', att + '.', att + '.'
             else:
-                return caption, "", att+ '.'
+                return caption, "", att + '.'
         else:
             print("CAPTION NOT FOUND IN ANNO")
-            return caption, "", ""        
-                            
+            return caption, "", ""
+
 
 @MODULE_BUILD_FUNCS.registe_with_name(module_name="groundingdino")
 def build_groundingdino(args):
-
     backbone = build_backbone(args)
     transformer = build_transformer(args)
 
