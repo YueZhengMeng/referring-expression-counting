@@ -6,7 +6,7 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 
 sys.path.append('GroundingDINO')
-from groundingdino.util.base_api import threshold
+from groundingdino.util.base_api import threshold, load_model
 import os
 import numpy as np
 
@@ -21,7 +21,7 @@ TEXT_TRESHOLD = 0.25
 processor = DataProcessor()
 annotations = processor.annotations
 
-BATCH_SIZE = 1
+BATCH_SIZE = 2
 train_loader = get_loader(processor, 'train', BATCH_SIZE)
 val_loader = get_loader(processor, 'val', BATCH_SIZE)
 test_loader = get_loader(processor, 'test', BATCH_SIZE)
@@ -32,7 +32,7 @@ print(f"Train: {len(train_loader.dataset)} | Val: {len(val_loader.dataset)} | Te
 
 """ model"""
 CONFIG_PATH = "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-CHECKPOINT_PATH = "./groundingdino_swint_ogc.pth"
+CHECKPOINT_PATH = "F:\\GroundingDINO\\groundingdino_swint_ogc.pth"
 # model = load_model(CONFIG_PATH, CHECKPOINT_PATH)
 
 # Build a tiny model from scratch for debugging (skip large pretrained checkpoint)
@@ -302,7 +302,7 @@ def calc_loc_metric(pred_boxes, gt_points):  # list of [xc,yc,w,h], tensor of (n
 
 # main 
 
-stats_dir = "./stats"
+stats_dir = "F://GroundingREC/stats"
 os.makedirs(stats_dir, exist_ok=True)
 
 stats_file = f"{stats_dir}/stats.txt"
@@ -319,7 +319,7 @@ with open(stats_file, 'a') as f:
 
 best_f1 = 0.0
 best_model = None
-for epoch in range(0, 15):
+for epoch in range(0, 2):
 
     train_mae, train_rmse, train_TP, train_FP, train_FN, train_precision, train_recall, train_f1 = train(epoch)
     val_mae, val_rmse, val_TP, val_FP, val_FN, val_precision, val_recall, val_f1 = eval('val', epoch)
