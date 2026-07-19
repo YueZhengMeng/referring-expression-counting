@@ -32,7 +32,7 @@ print(f"Train: {len(train_loader.dataset)} | Val: {len(val_loader.dataset)} | Te
 
 """ model"""
 CONFIG_PATH = "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-CHECKPOINT_PATH = "F:\\GroundingDINO\\groundingdino_swint_ogc.pth"
+CHECKPOINT_PATH = "../checkpoint/groundingdino_swint_ogc.pth"
 # model = load_model(CONFIG_PATH, CHECKPOINT_PATH)
 
 # Build a tiny model from scratch for debugging (skip large pretrained checkpoint)
@@ -54,7 +54,7 @@ args.two_stage_type = "no"
 args.use_checkpoint = False
 args.use_transformer_ckpt = False
 args.anno_path = "./anno/annotations.json"
-args.text_encoder_type = "F:/model/bert-base-uncased"  # use local BERT
+args.text_encoder_type = "../model/bert-base-uncased"  # use local BERT
 
 model = build_model(args)
 model = model.to(device)
@@ -302,7 +302,7 @@ def calc_loc_metric(pred_boxes, gt_points):  # list of [xc,yc,w,h], tensor of (n
 
 # main 
 
-stats_dir = "F://GroundingREC/stats"
+stats_dir = "./stats"
 os.makedirs(stats_dir, exist_ok=True)
 
 stats_file = f"{stats_dir}/stats.txt"
