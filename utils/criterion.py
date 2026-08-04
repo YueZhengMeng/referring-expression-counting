@@ -252,7 +252,6 @@ class SetCriterion(nn.Module):
                                targets)  # list of tuple [(pred_index, target_index),(pred_index, target_index)]
 
         caption_sizes = [t['caption_size'] for t in targets]
-        bs, _ = outputs['pred_logits'].shape[:2]
 
         num_points = sum(len(t["labels"]) for t in targets)
         num_points = torch.as_tensor([num_points], dtype=torch.float, device=next(iter(outputs.values())).device)
@@ -262,19 +261,5 @@ class SetCriterion(nn.Module):
         for loss in self.losses:
             losses.update(self.get_loss(loss, outputs, targets, indices, num_points, caption_sizes=caption_sizes,
                                         mask_bi=mask_bi))
-
-        # re-arrange indices of outputs based on targets
-        for b in range(bs):
-            output_indices = indices[b][0]
-            target_indices = indices[b][1]
-            for ti, oi in zip(target_indices, output_indices):
-                if ti > len(outputs['pred_points'][b]) - 1:
-                    continue
-                temp = outputs['pred_points'][b][ti].clone()
-                outputs['pred_points'][b][ti] = outputs['pred_points'][b][oi]
-                outputs['pred_points'][b][oi] = temp
-                temp = outputs['pred_logits'][0][ti].clone()
-                outputs['pred_logits'][b][ti] = outputs['pred_logits'][b][oi]
-                outputs['pred_logits'][b][oi] = temp
 
         return losses
