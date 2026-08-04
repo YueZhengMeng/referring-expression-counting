@@ -173,8 +173,9 @@ class SetCriterion(nn.Module):
 
         loss_list = []
         for i, img_emb in enumerate(img_embs):
-            bi = mask_bi[i]  # index of image in the batch e.g [0,0,0,1,1,1]
-            matched_pred_idxes = idx[1][torch.where(idx[0] == bi)[0]]
+            bi = mask_bi[i]  # original image index, used to group captions
+            # Hungarian indices use the flattened image-caption pair batch index.
+            matched_pred_idxes = idx[1][torch.where(idx[0] == i)[0]]
             matched_img_tokens = img_emb[matched_pred_idxes]
 
             # positive text embedding
