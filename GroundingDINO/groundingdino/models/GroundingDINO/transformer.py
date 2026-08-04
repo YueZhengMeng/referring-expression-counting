@@ -316,28 +316,14 @@ class Transformer(nn.Module):
             lower_tokens = torch.gather(output_memory, 1, lower_idxes.unsqueeze(-1).expand(-1, -1, self.d_model))
             higher_tokens = torch.gather(output_memory, 1, higher_idxes.unsqueeze(-1).expand(-1, -1, self.d_model))
 
-            text_subject_mask = text_dict["text_subject_mask"]
-            text_context_mask = text_dict["text_context_mask"]
-
-            # Extracting the tokens using the mask
-            subject_text_tokens = [text[mask] for text, mask in zip(text_dict["encoded_text"], text_subject_mask)]
-            context_text_tokens = [text[mask] for text, mask in zip(text_dict["encoded_text"], text_context_mask)]
-            max_size = text_dict["encoded_text"].size(1)
-            padded_subject_text_tokens = torch.stack(
-                [F.pad(t, (0, 0, 0, max_size - t.size(0))) for t in subject_text_tokens])
-            padded_context_text_tokens = torch.stack(
-                [F.pad(t, (0, 0, 0, max_size - t.size(0))) for t in context_text_tokens])
-
-            subject_mask = torch.stack(
-                [torch.cat([torch.ones(t.size(0)).to(t.device), torch.zeros(max_size - t.size(0)).to(t.device)]) for t
-                 in subject_text_tokens])
-            context_mask = torch.stack(
-                [torch.cat([torch.ones(t.size(0)).to(t.device), torch.zeros(max_size - t.size(0)).to(t.device)]) for t
-                 in context_text_tokens])
-
-            lower_tokens = self.cross_attention(lower_tokens, padded_subject_text_tokens, V_mask=subject_mask)
-            if context_mask.sum() > 2:  # not all [CLS][SEP] tokens
-                higher_tokens = self.cross_attention(higher_tokens, padded_context_text_tokens, V_mask=context_mask)
+            lower_tokens, higher_tokens = _apply_subject_and_context_attention(
+                self.cross_attention,
+                lower_tokens,
+                higher_tokens,
+                text_dict["encoded_text"],
+                text_dict["text_subject_mask"],
+                text_dict["text_context_mask"],
+            )
 
             updated_lower_tokens = self.cross_attention(lower_tokens, higher_tokens)
             output_memory = output_memory.scatter(1, lower_idxes.unsqueeze(-1).expand(-1, -1, self.d_model),
@@ -1013,6 +999,69 @@ class CrossAttentionLayer(nn.Module):
         # Add & norm
         updated_lower_tokens = self.norm(attn_output.transpose(0, 1) + lower_tokens)
         return updated_lower_tokens
+
+
+def _pad_selected_text_tokens(encoded_text, selection_mask):
+    selected_text_tokens = [text[mask] for text, mask in zip(encoded_text, selection_mask)]
+    max_size = encoded_text.size(1)
+    padded_text_tokens = torch.stack(
+        [F.pad(tokens, (0, 0, 0, max_size - tokens.size(0))) for tokens in selected_text_tokens]
+    )
+    valid_lengths = selection_mask.sum(dim=1)
+    positions = torch.arange(max_size, device=encoded_text.device).unsqueeze(0)
+    key_padding_mask = positions >= valid_lengths.unsqueeze(1)
+    return padded_text_tokens, key_padding_mask
+
+
+def _apply_text_cross_attention(
+        cross_attention,
+        query_tokens,
+        encoded_text,
+        selection_mask,
+        active_rows=None,
+):
+    if active_rows is None:
+        active_rows = torch.ones(query_tokens.size(0), dtype=torch.bool, device=query_tokens.device)
+
+    active_indices = torch.nonzero(active_rows, as_tuple=False).flatten()
+    if active_indices.numel() == 0:
+        return query_tokens
+
+    active_text, key_padding_mask = _pad_selected_text_tokens(
+        encoded_text.index_select(0, active_indices),
+        selection_mask.index_select(0, active_indices),
+    )
+    updated_tokens = cross_attention(
+        query_tokens.index_select(0, active_indices),
+        active_text,
+        V_mask=key_padding_mask,
+    )
+    return query_tokens.index_copy(0, active_indices, updated_tokens)
+
+
+def _apply_subject_and_context_attention(
+        cross_attention,
+        lower_tokens,
+        higher_tokens,
+        encoded_text,
+        subject_mask,
+        context_mask,
+):
+    lower_tokens = _apply_text_cross_attention(
+        cross_attention,
+        lower_tokens,
+        encoded_text,
+        subject_mask,
+    )
+    valid_context_rows = context_mask.sum(dim=1) > 2  # More than [CLS] and [SEP].
+    higher_tokens = _apply_text_cross_attention(
+        cross_attention,
+        higher_tokens,
+        encoded_text,
+        context_mask,
+        valid_context_rows,
+    )
+    return lower_tokens, higher_tokens
 
 
 def split_tokens(topk_proposals):
