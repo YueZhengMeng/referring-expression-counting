@@ -1,6 +1,5 @@
 import os
 
-import torch
 from torch.utils.data import Dataset, DataLoader
 
 from groundingdino.util.base_api import load_image, preprocess_caption
@@ -10,23 +9,16 @@ from utils.processor import DataProcessor
 def collate_fn(batch):
     images, labels, shapes, img_ids = zip(*batch)
 
-    # Get the max height and width among the images
-    max_height = max([img.shape[1] for img in images])
-    max_width = max([img.shape[2] for img in images])
-
-    # Create tensors filled with zeros to store padded images
-    padded_images = torch.zeros(len(images), 3, max_height, max_width)
-
-    # Pad each image and add to the padded_images tensor
-    for i, img in enumerate(images):
-        padded_images[i, :, :img.shape[1], :img.shape[2]] = img
+    # Keep variable-sized tensors unpadded. GroundingDINO will create a
+    # NestedTensor and the corresponding padding mask at model input time.
+    images = list(images)
 
     # tuple to list
     labels = list(labels)
     shapes = list(shapes)
     img_ids = list(img_ids)
 
-    return padded_images, labels, shapes, img_ids  # tensor (bs,3,h,w), list (), list ((w,h)), list ()
+    return images, labels, shapes, img_ids  # list of (3,h,w) tensors, list (), list ((w,h)), list ()
 
 
 def get_loader(processor: DataProcessor, split, batch_size):

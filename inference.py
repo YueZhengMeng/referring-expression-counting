@@ -23,6 +23,8 @@ from utils.image_loader import get_loader
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 TEXT_TRESHOLD = 0.25
+BOX_THRESHOLD = 0.25
+TOKEN_THRESHOLD = 0.35
 
 
 def sanitize_filename(s):
@@ -61,11 +63,21 @@ def visualize_prediction(image_path, gt_points_pixel, pred_points_norm, shape, c
 
     # Predicted points — red crosses (convert normalised → pixel)
     if len(pred_points_norm) > 0:
-        pred_pts = np.array(pred_points_norm)
-        pred_pts[:, 0] *= w
-        pred_pts[:, 1] *= h
-        ax.scatter(pred_pts[:, 0], pred_pts[:, 1], c='red', s=80, marker='x',
-                   linewidths=2, label=f'Pred ({len(pred_points_norm)})', zorder=5)
+        pred_pts = np.asarray(pred_points_norm, dtype=np.float64).copy()
+        if pred_pts.ndim != 2 or pred_pts.shape[1] < 2:
+            raise ValueError(f"Expected predicted points with shape (N, 2), got {pred_pts.shape}")
+        pred_pts = pred_pts[:, :2]
+        finite_mask = np.isfinite(pred_pts).all(axis=1)
+        in_image_mask = ((pred_pts >= 0.0) & (pred_pts <= 1.0)).all(axis=1)
+        valid_mask = finite_mask & in_image_mask
+        if not valid_mask.all():
+            print(f"  [WARN] ignoring {int((~valid_mask).sum())} invalid normalized predictions for {image_path}")
+        pred_pts = pred_pts[valid_mask]
+        if len(pred_pts) > 0:
+            pred_pts[:, 0] *= w
+            pred_pts[:, 1] *= h
+            ax.scatter(pred_pts[:, 0], pred_pts[:, 1], c='red', s=80, marker='x',
+                       linewidths=2, label=f'Pred ({len(pred_pts)})', zorder=5)
 
     ax.legend(loc='upper right')
     # display image filename + caption as title
@@ -78,7 +90,8 @@ def visualize_prediction(image_path, gt_points_pixel, pred_points_norm, shape, c
     plt.close(fig)
 
 
-def eval(model, loader, annotations, image_dir, output_dir, split):
+def eval(model, loader, annotations, image_dir, output_dir, split,
+         box_threshold=BOX_THRESHOLD, token_threshold=TOKEN_THRESHOLD):
     print(f"Inference on {split} set")
     model.eval()
 
@@ -105,28 +118,32 @@ def eval(model, loader, annotations, image_dir, output_dir, split):
         'error', 'abs_error', 'vis_path'
     ])
 
-    for images, captions, shapes, img_caps in loader:  # tensor, list, list, list
+    for images, captions, shapes, img_caps in loader:  # list of tensors, list, list, list
 
         anno_b = [annotations[img_cap] for img_cap_list in img_caps for img_cap in img_cap_list]
         img_caps = [img_cap for img_cap_list in img_caps for img_cap in img_cap_list]
         shapes = [shapes[i] for i, caption_list in enumerate(captions) for _ in caption_list]
 
-        # save original GT points (pixel coords) before prepare_targets mutates anno_b
+        # save original GT points (pixel coords)
         orig_gt_points = [list(anno['points']) for anno in anno_b]
 
-        images = torch.stack([images[i] for i, caption_list in enumerate(captions) for _ in caption_list], dim=0)
-        captions = [caption for caption_list in captions for caption in caption_list]  # flatten list of list
-        images = images.to(device)
+        # Keep each image unpadded so GroundingDINO can build a per-image mask.
+        images = [images[i].to(device) for i, caption_list in enumerate(captions)
+                  for _ in caption_list]
+        captions = [caption for caption_list in captions for caption in caption_list]
         with torch.no_grad():
             outputs = model(images, captions=captions)
 
         outputs["pred_points"] = outputs["pred_boxes"][:, :, :2]
 
-        # prepare targets
+        # prepare targets without mutating shared annotations
         emb_size = outputs["pred_logits"].shape[2]
-        targets = prepare_targets(anno_b, captions, shapes, emb_size)
+        targets = prepare_targets(anno_b, captions, shapes, emb_size,
+                                  target_device=outputs['pred_logits'].device)
 
-        results = threshold(outputs, captions, model.tokenizer, TEXT_TRESHOLD)
+        results = threshold(
+            outputs, captions, model.tokenizer, TEXT_TRESHOLD,
+            box_threshold=box_threshold, token_threshold=token_threshold)
         for b in range(len(results)):
             boxes, logits, phrases = results[b]
             boxes = [box.tolist() for box in boxes]
@@ -137,6 +154,9 @@ def eval(model, loader, annotations, image_dir, output_dir, split):
 
             # calculate error
             pred_cnt = len(points)
+            if pred_cnt == 0:
+                print(f"  [INFO] no prediction passed thresholds for {img_caps[b]} "
+                      f"(box>{box_threshold}, token>{token_threshold})")
             gt_cnt = len(targets[b]["points"])
             cnt_err = abs(pred_cnt - gt_cnt)
             eval_mae += cnt_err
@@ -189,12 +209,12 @@ def eval(model, loader, annotations, image_dir, output_dir, split):
     return eval_mae, eval_rmse, eval_tp, eval_fp, eval_fn, eval_precision, eval_recall, eval_f1
 
 
-def prepare_targets(anno_b, captions, shapes, emb_size):
-    for anno in anno_b:
-        if len(anno['points']) == 0:
-            anno['points'] = [[0, 0]]
-    gt_points_b = [np.array(anno['points']) / np.array(shape)[::-1] for anno, shape in
-                   zip(anno_b, shapes)]  # (h,w) -> (w,h)
+def prepare_targets(anno_b, captions, shapes, emb_size, target_device=None):
+    target_device = target_device or device
+    gt_points_b = [
+        np.asarray(anno['points'], dtype=np.float32).reshape(-1, 2) / np.array(shape)[::-1]
+        for anno, shape in zip(anno_b, shapes)
+    ]
     gt_points = [torch.from_numpy(img_points).to(torch.float32) for img_points in gt_points_b]
 
     gt_logits = [torch.zeros((img_points.shape[0], emb_size)) for img_points in gt_points]
@@ -208,7 +228,7 @@ def prepare_targets(anno_b, captions, shapes, emb_size):
 
     caption_sizes = [end_idx + 2 for end_idx in end_idxes]  # incl. CLS and SEP
 
-    targets = [{"points": img_gt_points.to(device), "labels": img_gt_logits.to(device), "caption_size": caption_size}
+    targets = [{"points": img_gt_points.to(target_device), "labels": img_gt_logits.to(target_device), "caption_size": caption_size}
                for img_gt_points, img_gt_logits, caption_size in zip(gt_points, gt_logits, caption_sizes)]
 
     return targets
@@ -263,7 +283,7 @@ def calc_loc_metric(pred_boxes, gt_points):  # list of [xc,yc,w,h], tensor of (n
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Inference on train/val/test sets')
     parser.add_argument('--checkpoint', type=str,
-                        default='../checkpoint/GroundingREC/rec_model.pth',
+                        default='F://GroundingREC/rec_model.pth',
                         help='Path to the model checkpoint (.pth file)')
     parser.add_argument('--config', type=str,
                         default='GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py',
@@ -273,11 +293,17 @@ if __name__ == '__main__':
                         choices=['train', 'val', 'test'],
                         help='Split to evaluate on')
     parser.add_argument('--batch_size', type=int,
-                        default=4,
+                        default=2,
                         help='Batch size for data loaders')
     parser.add_argument('--output_dir', type=str,
                         default='./case_study_output',
                         help='Directory to save visualizations and CSV')
+    parser.add_argument('--box_threshold', type=float,
+                        default=BOX_THRESHOLD,
+                        help='Minimum global score for keeping a prediction')
+    parser.add_argument('--token_threshold', type=float,
+                        default=TOKEN_THRESHOLD,
+                        help='Minimum local token score for keeping a prediction')
     args = parser.parse_args()
 
     """ model """
@@ -300,7 +326,8 @@ if __name__ == '__main__':
     """ inference """
     output_dir = os.path.join(args.output_dir, split)
     mae, rmse, TP, FP, FN, precision, recall, f1 = eval(
-        model, loader, annotations, image_dir, output_dir, split)
+        model, loader, annotations, image_dir, output_dir, split,
+        box_threshold=args.box_threshold, token_threshold=args.token_threshold)
     print(
         f'[{split}] MAE: {mae:5.2f}, RMSE: {rmse:5.2f}, TP: {TP}, FP: {FP}, FN: {FN}, '
         f'precision: {precision:5.2f}, recall: {recall:5.2f}, F1: {f1:5.2f}'

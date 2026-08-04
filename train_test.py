@@ -32,7 +32,7 @@ print(f"Train: {len(train_loader.dataset)} | Val: {len(val_loader.dataset)} | Te
 
 """ model"""
 CONFIG_PATH = "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-CHECKPOINT_PATH = "../checkpoint/groundingdino_swint_ogc.pth"
+CHECKPOINT_PATH = "F:/GroundingDINO/groundingdino_swint_ogc.pth"
 # model = load_model(CONFIG_PATH, CHECKPOINT_PATH)
 
 # Build a tiny model from scratch for debugging (skip large pretrained checkpoint)
@@ -54,7 +54,7 @@ args.two_stage_type = "no"
 args.use_checkpoint = False
 args.use_transformer_ckpt = False
 args.anno_path = "./anno/annotations.json"
-args.text_encoder_type = "../model/bert-base-uncased"  # use local BERT
+args.text_encoder_type = "F:/model/bert-base-uncased"  # use local BERT
 
 model = build_model(args)
 model = model.to(device)
@@ -87,7 +87,7 @@ def train(epoch):
     counter_for_image = 0
     train_size = len(loader.dataset)
 
-    for images, captions, shapes, img_caps in loader:  # tensor, list of list [caption] for each image in the batch, list, list of list [(img, cap)] for each img in the batch
+    for images, captions, shapes, img_caps in loader:  # list of tensors, list of list [caption] for each image
         # images: [b1_img, b2_img,...] captions: [ [b1_cap1, b1_cap2], [b2_cap1, b2_cap2], ...]
 
         mask_bi = [i for i, img_cap_list in enumerate(img_caps) for _ in
@@ -99,9 +99,10 @@ def train(epoch):
         optimizer.zero_grad()
 
         # duplicate each image number of times that is equal to the number of captions for that image
-        images = torch.stack([images[i] for i, caption_list in enumerate(captions) for _ in caption_list], dim=0)
-        captions = [caption for caption_list in captions for caption in caption_list]  # flatten list of list
-        images = images.to(device)
+        # Keep variable-sized images as a list; GroundingDINO builds the padding mask.
+        images = [images[i].to(device) for i, caption_list in enumerate(captions)
+                  for _ in caption_list]
+        captions = [caption for caption_list in captions for caption in caption_list]
         outputs = model(images, captions=captions)
 
         outputs["pred_points"] = outputs["pred_boxes"][:, :, :2]
@@ -172,15 +173,15 @@ def eval(split, epoch=None):
     counter_for_image = 0
     eval_size = len(loader.dataset)
 
-    for images, captions, shapes, img_caps in loader:  # tensor, list, list, list
+    for images, captions, shapes, img_caps in loader:  # list of tensors, list, list, list
 
         anno_b = [annotations[img_cap] for img_cap_list in img_caps for img_cap in img_cap_list]
         img_caps = [img_cap for img_cap_list in img_caps for img_cap in img_cap_list]
         shapes = [shapes[i] for i, caption_list in enumerate(captions) for _ in caption_list]
 
-        images = torch.stack([images[i] for i, caption_list in enumerate(captions) for _ in caption_list], dim=0)
-        captions = [caption for caption_list in captions for caption in caption_list]  # flatten list of list
-        images = images.to(device)
+        images = [images[i].to(device) for i, caption_list in enumerate(captions)
+                  for _ in caption_list]
+        captions = [caption for caption_list in captions for caption in caption_list]
         with torch.no_grad():
             outputs = model(images, captions=captions)
 
@@ -230,11 +231,8 @@ def eval(split, epoch=None):
 
 
 def prepare_targets(anno_b, captions, shapes, emb_size):
-    for anno in anno_b:
-        if len(anno['points']) == 0:
-            anno['points'] = [[0, 0]]
-    gt_points_b = [np.array(anno['points']) / np.array(shape)[::-1] for anno, shape in
-                   zip(anno_b, shapes)]  # (h,w) -> (w,h)
+    gt_points_b = [np.array(anno['points'] or [[0, 0]]) / np.array(shape)[::-1]
+                   for anno, shape in zip(anno_b, shapes)]  # (h,w) -> (w,h)
     gt_points = [torch.from_numpy(img_points).to(torch.float32) for img_points in gt_points_b]
 
     gt_logits = [torch.zeros((img_points.shape[0], emb_size)) for img_points in gt_points]
@@ -302,7 +300,7 @@ def calc_loc_metric(pred_boxes, gt_points):  # list of [xc,yc,w,h], tensor of (n
 
 # main 
 
-stats_dir = "./stats"
+stats_dir = "F://GroundingREC/stats"
 os.makedirs(stats_dir, exist_ok=True)
 
 stats_file = f"{stats_dir}/stats.txt"
@@ -317,7 +315,7 @@ with open(stats_file, 'a') as f:
               'test_f1']
     f.write("%s\n" % ' | '.join(header))
 
-best_f1 = 0.0
+best_f1 = float('-inf')
 best_model = None
 for epoch in range(0, 2):
 

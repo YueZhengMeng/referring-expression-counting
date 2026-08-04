@@ -46,7 +46,9 @@ def threshold(
         outputs,
         captions: str,
         tokenizer,
-        text_threshold: float):
+        text_threshold: float,
+        box_threshold: float = 0.25,
+        token_threshold: float = 0.35):
     bs = outputs["pred_logits"].shape[0]
 
     ret = []
@@ -58,13 +60,9 @@ def threshold(
         input_ids = tokenized['input_ids']
         end_idx = np.where(np.array(input_ids) == 1012)[0][-1]
 
-        # find mask index where all the valid tokens are above the threshold
-        threshold1 = 0.25
-        threshold2 = 0.35
-        # for global context
-        mask1 = prediction_logits[:, 0].gt(threshold1)
-        # for local context
-        mask2 = prediction_logits[:, 1:end_idx].gt(threshold2).all(dim=1)
+        # Keep a query only when its global score and all local tokens pass.
+        mask1 = prediction_logits[:, 0].gt(box_threshold)
+        mask2 = prediction_logits[:, 1:end_idx].gt(token_threshold).all(dim=1)
         mask = mask1 & mask2
 
         logits = prediction_logits[mask]

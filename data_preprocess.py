@@ -18,7 +18,7 @@ Assuming the following directory structure (refer to README.md for more details)
     - jhu_crowd_v2.0/test/images
 """
 
-DATA_ROOT = f"../rec-8k"  # Update this to your data root
+DATA_ROOT = f"F:/REC-8K"  # Update this to your data root
 
 # Create "rec-8k" images folder in the DATA_ROOT
 os.makedirs(os.path.join(DATA_ROOT, "rec-8k"), exist_ok=True)

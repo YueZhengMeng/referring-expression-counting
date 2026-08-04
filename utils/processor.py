@@ -2,7 +2,7 @@ import json
 
 
 class DataProcessor():
-    def __init__(self, image_path='../rec-8k', anno_file_path='anno/annotations.json',
+    def __init__(self, image_path='F:/REC-8K/rec-8k', anno_file_path='anno/annotations.json',
                  split_file_path='anno/splits.json'):
         # 实现自定义路径
         self.image_path = image_path
