@@ -155,8 +155,8 @@ def sigmoid_focal_loss(
     """
 
     prob = inputs.sigmoid()  # (bs,900,256)
-    # ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none") # (bs,900,256)
-    ce_loss = F.binary_cross_entropy(prob, targets, reduction="none")
+    # ce_loss = F.binary_cross_entropy(prob, targets, reduction="none") # (bs,900,256)
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
 
     p_t = prob * targets + (1 - prob) * (1 - targets)
     loss = ce_loss * ((1 - p_t) ** gamma)

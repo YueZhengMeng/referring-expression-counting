@@ -340,7 +340,7 @@ class Transformer(nn.Module):
                 higher_tokens = self.cross_attention(higher_tokens, padded_context_text_tokens, V_mask=context_mask)
 
             updated_lower_tokens = self.cross_attention(lower_tokens, higher_tokens)
-            output_memory = output_memory.scatter(1, lower_idxes.unsqueeze(-1).expand(-1, -1, 256),
+            output_memory = output_memory.scatter(1, lower_idxes.unsqueeze(-1).expand(-1, -1, self.d_model),
                                                   updated_lower_tokens)
 
             refpoint_embed_undetach = torch.gather(

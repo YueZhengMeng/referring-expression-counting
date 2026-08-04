@@ -16,6 +16,8 @@ from utils.image_loader import get_loader
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 TEXT_TRESHOLD = 0.25
+BOX_THRESHOLD = 0.25
+TOKEN_THRESHOLD = 0.35
 
 """ data """
 processor = DataProcessor()
@@ -71,7 +73,7 @@ criterion = SetCriterion()
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=0.0001)
 
 
-def train(epoch):
+def train(epoch, *, box_threshold=BOX_THRESHOLD, token_threshold=TOKEN_THRESHOLD):
     print(f"Training on train set data")
     model.train()
     loader = loaders['train']
@@ -120,7 +122,9 @@ def train(epoch):
         optimizer.step()
 
         counter_for_image += 1
-        results = threshold(outputs, captions, model.tokenizer, TEXT_TRESHOLD)
+        results = threshold(
+            outputs, captions, model.tokenizer, TEXT_TRESHOLD,
+            box_threshold=box_threshold, token_threshold=token_threshold)
         for b in range(len(results)):  # (bs*num_cap)
             boxes, logits, phrases = results[b]
             boxes = [box.tolist() for box in boxes]
@@ -157,7 +161,7 @@ def train(epoch):
     return train_mae, train_rmse, train_tp, train_fp, train_fn, train_precision, train_recall, train_f1
 
 
-def eval(split, epoch=None):
+def eval(split, epoch=None, *, box_threshold=BOX_THRESHOLD, token_threshold=TOKEN_THRESHOLD):
     print(f"Evaluation on {split} set")
     model.eval()
     loader = loaders[split]
@@ -193,7 +197,9 @@ def eval(split, epoch=None):
 
         counter_for_image += 1
 
-        results = threshold(outputs, captions, model.tokenizer, TEXT_TRESHOLD)
+        results = threshold(
+            outputs, captions, model.tokenizer, TEXT_TRESHOLD,
+            box_threshold=box_threshold, token_threshold=token_threshold)
         for b in range(len(results)):
             boxes, logits, phrases = results[b]
             boxes = [box.tolist() for box in boxes]

@@ -38,7 +38,7 @@ class HungarianMatcher(nn.Module):
         bs, num_queries = outputs["pred_logits"].shape[:2]
 
         # flatten to compute the cost matrices in a batch
-        out_prob = outputs["pred_logits"].sigmoid().flatten(0, 1)
+        out_logits = outputs["pred_logits"].flatten(0, 1)
         out_point = outputs["pred_points"].flatten(0, 1)
 
         # Also concat the target labels and boxes
@@ -46,15 +46,14 @@ class HungarianMatcher(nn.Module):
         tgt_point = torch.cat([v["points"] for v in targets])
 
         """ class cost """
-        out_prob_exp = out_prob.unsqueeze(1).expand(-1, tgt_ids.shape[0], -1)
-        # change nan value of out_prob_exp to 0
-        out_prob_exp[torch.isnan(out_prob_exp)] = 0
-        tgt_ids_exp = tgt_ids.unsqueeze(0).expand(out_prob.shape[0], -1, -1)
+        out_logits_exp = out_logits.unsqueeze(1).expand(-1, tgt_ids.shape[0], -1)
+        # change nan value of out_logits_exp to 0
+        out_logits_exp = torch.nan_to_num(out_logits_exp, nan=0.0)
+        tgt_ids_exp = tgt_ids.unsqueeze(0).expand(out_logits.shape[0], -1, -1)
 
-        assert (out_prob_exp >= 0).all() and (out_prob_exp <= 1).all(), "Invalid values in out_prob_exp"
         assert (tgt_ids_exp >= 0).all() and (tgt_ids_exp <= 1).all(), "Invalid values in tgt_ids_exp"
 
-        losses = F.binary_cross_entropy(out_prob_exp, tgt_ids_exp, reduction="none")
+        losses = F.binary_cross_entropy_with_logits(out_logits_exp, tgt_ids_exp, reduction="none")
         cost_class = losses.mean(dim=2)
 
         """ point cost """
@@ -90,7 +89,7 @@ def sigmoid_focal_loss(
     """
 
     prob = inputs.sigmoid()
-    ce_loss = F.binary_cross_entropy(prob, targets, reduction="none")
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
 
     p_t = prob * targets + (1 - prob) * (1 - targets)
     loss = ce_loss * ((1 - p_t) ** gamma)
