@@ -53,13 +53,9 @@ def visualize_prediction(image_path, gt_points_pixel, pred_points_norm, shape, c
     # Ground-truth points — green circles
     if len(gt_points_pixel) > 0:
         gt_pts = np.array(gt_points_pixel)
-        # filter out the [0, 0] placeholder injected by prepare_targets for empty samples
-        valid_mask = ~((gt_pts[:, 0] == 0) & (gt_pts[:, 1] == 0))
-        if valid_mask.any():
-            gt_pts = gt_pts[valid_mask]
-            ax.scatter(gt_pts[:, 0], gt_pts[:, 1], c='lime', s=80, marker='o',
-                       edgecolors='darkgreen', linewidths=1.5,
-                       label=f'GT ({len(gt_pts)})', zorder=5)
+        ax.scatter(gt_pts[:, 0], gt_pts[:, 1], c='lime', s=80, marker='o',
+                   edgecolors='darkgreen', linewidths=1.5,
+                   label=f'GT ({len(gt_pts)})', zorder=5)
 
     # Predicted points — red crosses (convert normalised → pixel)
     if len(pred_points_norm) > 0:

@@ -237,8 +237,10 @@ def eval(split, epoch=None, *, box_threshold=BOX_THRESHOLD, token_threshold=TOKE
 
 
 def prepare_targets(anno_b, captions, shapes, emb_size):
-    gt_points_b = [np.array(anno['points'] or [[0, 0]]) / np.array(shape)[::-1]
-                   for anno, shape in zip(anno_b, shapes)]  # (h,w) -> (w,h)
+    gt_points_b = [
+        np.asarray(anno['points'], dtype=np.float32).reshape(-1, 2) / np.array(shape)[::-1]
+        for anno, shape in zip(anno_b, shapes)
+    ]  # (h,w) -> (w,h)
     gt_points = [torch.from_numpy(img_points).to(torch.float32) for img_points in gt_points_b]
 
     gt_logits = [torch.zeros((img_points.shape[0], emb_size)) for img_points in gt_points]
