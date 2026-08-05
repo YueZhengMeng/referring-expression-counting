@@ -1,26 +1,39 @@
-import copy
+import os
 import sys
 
 import torch
-from scipy.optimize import linear_sum_assignment
-from scipy.spatial.distance import cdist
 
 sys.path.append('GroundingDINO')
-from groundingdino.util.base_api import threshold, load_model
-import os
-import numpy as np
+from groundingdino.util.base_api import threshold
 
+from utils.evaluation import calc_loc_metric, prepare_targets
+from utils.image_loader import get_loader
+from utils.model_utils import (build_model_for_mode, cpu_state_dict,
+                               freeze_encoders, load_checkpoint, load_pretrained,
+                               resolve_device, set_finetuning_mode,
+                               trainable_parameters)
 from utils.processor import DataProcessor
 from utils.criterion import SetCriterion
-from utils.image_loader import get_loader
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# Notebook-friendly controls. Keep tiny as the default for local data-flow debugging.
+MODEL_MODE = "tiny"  # "tiny", "compact_rec", or "full"
+DEVICE = "auto"
+IMAGE_DIR = "F:/REC-8K/rec-8k"
+ANNOTATIONS_PATH = "anno/annotations.json"
+SPLITS_PATH = "anno/splits.json"
+CONFIG_PATH = "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+TEXT_ENCODER = "F:/model/bert-base-uncased"  # replace with a local/cache path when needed
+PRETRAINED_CHECKPOINT = "F:/GroundingDINO/groundingdino_swint_ogc.pth"
+RESUME_CHECKPOINT = None
+STATS_DIR = "./stats"
+
+device = resolve_device(DEVICE)
 TEXT_TRESHOLD = 0.25
 BOX_THRESHOLD = 0.25
 TOKEN_THRESHOLD = 0.35
 
 """ data """
-processor = DataProcessor()
+processor = DataProcessor(IMAGE_DIR, ANNOTATIONS_PATH, SPLITS_PATH)
 annotations = processor.annotations
 
 BATCH_SIZE = 2
@@ -32,50 +45,26 @@ loaders = {'train': train_loader, 'val': val_loader, 'test': test_loader}
 print("Data loaded!")
 print(f"Train: {len(train_loader.dataset)} | Val: {len(val_loader.dataset)} | Test: {len(test_loader.dataset)}")
 
-""" model"""
-CONFIG_PATH = "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-CHECKPOINT_PATH = "F:/GroundingDINO/groundingdino_swint_ogc.pth"
-# model = load_model(CONFIG_PATH, CHECKPOINT_PATH)
-
-# Build a tiny model from scratch for debugging (skip large pretrained checkpoint)
-from groundingdino.models import build_model
-from groundingdino.util.slconfig import SLConfig
-
-args = SLConfig.fromfile(CONFIG_PATH)
-args.device = device
-# Drastically reduce model size to fit laptop GPU
-args.hidden_dim = 64
-args.dim_feedforward = 256
-args.enc_layers = 1
-args.dec_layers = 1
-args.num_queries = 10
-args.nheads = 4
-args.num_feature_levels = 1
-args.return_interm_indices = [3]
-args.two_stage_type = "no"
-args.use_checkpoint = False
-args.use_transformer_ckpt = False
-args.anno_path = "./anno/annotations.json"
-args.text_encoder_type = "F:/model/bert-base-uncased"  # use local BERT
-
-model = build_model(args)
-model = model.to(device)
-
-# freeze encoders
-for param in model.backbone.parameters():
-    param.requires_grad = False
-for param in model.bert.parameters():
-    param.requires_grad = False
+""" model """
+model, args, model_overrides = build_model_for_mode(
+    CONFIG_PATH, MODEL_MODE, device=device, text_encoder=TEXT_ENCODER,
+    extra_overrides={"anno_path": ANNOTATIONS_PATH},
+)
+if MODEL_MODE == "full":
+    model = load_pretrained(model, PRETRAINED_CHECKPOINT)
+freeze_encoders(model)
+model = set_finetuning_mode(model)
 
 """ criterion """
 criterion = SetCriterion()
-
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=0.0001)
+optimizer = torch.optim.AdamW(trainable_parameters(model), lr=1e-5, weight_decay=0.0001)
 
 
 def train(epoch, *, box_threshold=BOX_THRESHOLD, token_threshold=TOKEN_THRESHOLD):
     print(f"Training on train set data")
     model.train()
+    model.backbone.eval()
+    model.bert.eval()
     loader = loaders['train']
 
     train_mae = 0
@@ -111,7 +100,10 @@ def train(epoch, *, box_threshold=BOX_THRESHOLD, token_threshold=TOKEN_THRESHOLD
 
         # prepare targets
         emb_size = outputs["pred_logits"].shape[2]
-        targets = prepare_targets(anno_b, captions, shapes, emb_size)
+        targets = prepare_targets(
+            anno_b, captions, shapes, model.tokenizer, emb_size,
+            image_group_ids=mask_bi, device=device, max_text_len=model.max_text_len
+        )
 
         loss_dict = criterion(outputs, targets, mask_bi)
         weight_dict = criterion.weight_dict
@@ -193,7 +185,10 @@ def eval(split, epoch=None, *, box_threshold=BOX_THRESHOLD, token_threshold=TOKE
 
         # prepare targets
         emb_size = outputs["pred_logits"].shape[2]
-        targets = prepare_targets(anno_b, captions, shapes, emb_size)
+        targets = prepare_targets(
+            anno_b, captions, shapes, model.tokenizer, emb_size,
+            image_group_ids=mask_bi, device=device, max_text_len=model.max_text_len
+        )
 
         counter_for_image += 1
 
@@ -236,79 +231,13 @@ def eval(split, epoch=None, *, box_threshold=BOX_THRESHOLD, token_threshold=TOKE
     return eval_mae, eval_rmse, eval_tp, eval_fp, eval_fn, eval_precision, eval_recall, eval_f1
 
 
-def prepare_targets(anno_b, captions, shapes, emb_size):
-    gt_points_b = [
-        np.asarray(anno['points'], dtype=np.float32).reshape(-1, 2) / np.array(shape)[::-1]
-        for anno, shape in zip(anno_b, shapes)
-    ]  # (h,w) -> (w,h)
-    gt_points = [torch.from_numpy(img_points).to(torch.float32) for img_points in gt_points_b]
-
-    gt_logits = [torch.zeros((img_points.shape[0], emb_size)) for img_points in gt_points]
-
-    tokenized = model.tokenizer(captions, padding="longest", return_tensors="pt")
-
-    # find last index of special token (.)
-    end_idxes = [torch.where(input_ids == 1012)[0][-1] for input_ids in tokenized['input_ids']]
-    for i, end_idx in enumerate(end_idxes):
-        gt_logits[i][:, :end_idx] = 1.0
-
-    caption_sizes = [end_idx + 2 for end_idx in end_idxes]  # incl. CLS and SEP
-
-    targets = [{"points": img_gt_points.to(device), "labels": img_gt_logits.to(device), "caption_size": caption_size}
-               for img_gt_points, img_gt_logits, caption_size in zip(gt_points, gt_logits, caption_sizes)]
-
-    return targets
-
-
-def distance_threshold_func(boxes):  # list of [xc,yc,w,h]
-    if len(boxes) == 0:
-        return 0.0
-    # find median index of boxes areas
-    areas = [box[2] * box[3] for box in boxes]
-    median_idx = np.argsort(areas)[len(areas) // 2]
-    median_box = boxes[median_idx]
-    w = median_box[2]
-    h = median_box[3]
-
-    threshold = np.sqrt(w ** 2 + h ** 2) / 2.0
-
-    return threshold
-
-
-def calc_loc_metric(pred_boxes, gt_points):  # list of [xc,yc,w,h], tensor of (nt,2)
-    if len(pred_boxes) == 0:
-        FN = len(gt_points)
-        return 0, 0, FN, 0, 0, 0
-
-    dist_threshold = distance_threshold_func(pred_boxes)
-    pred_points = np.array([[box[0], box[1]] for box in pred_boxes])
-    gt_points = gt_points.cpu().detach().numpy()
-
-    # create a cost matrix
-    cost_matrix = cdist(pred_points, gt_points, metric='euclidean')
-
-    # use Hungarian algorithm to find optimal assignment
-    pred_indices, gt_indices = linear_sum_assignment(cost_matrix)
-
-    # determine TP, FP, FN
-    TP = 0
-    for pred_idx, gt_idx in zip(pred_indices, gt_indices):
-        if cost_matrix[pred_idx, gt_idx] < dist_threshold:
-            TP += 1
-
-    FP = len(pred_points) - TP
-    FN = len(gt_points) - TP
-
-    Precision = TP / (TP + FP) if TP + FP != 0 else 0.0
-    Recall = TP / (TP + FN) if TP + FN != 0 else 0.0
-    F1 = 2 * (Precision * Recall) / (Precision + Recall) if Precision + Recall != 0 else 0.0
-
-    return TP, FP, FN, Precision, Recall, F1
+# Target construction and localization metrics live in utils.evaluation so
+# notebook training and standalone inference use exactly the same contract.
 
 
 # main 
 
-stats_dir = "F://GroundingREC/stats"
+stats_dir = STATS_DIR
 os.makedirs(stats_dir, exist_ok=True)
 
 stats_file = f"{stats_dir}/stats.txt"
@@ -324,7 +253,7 @@ with open(stats_file, 'a') as f:
     f.write("%s\n" % ' | '.join(header))
 
 best_f1 = float('-inf')
-best_model = None
+best_state = None
 for epoch in range(0, 2):
 
     train_mae, train_rmse, train_TP, train_FP, train_FN, train_precision, train_recall, train_f1 = train(epoch)
@@ -333,7 +262,7 @@ for epoch in range(0, 2):
     if best_f1 < val_f1:
         best_f1 = val_f1
         print(f"New best F1: {best_f1}")
-        best_model = copy.deepcopy(model)
+        best_state = cpu_state_dict(model)
 
     stats.append(
         [train_mae, train_rmse, train_TP, train_FP, train_FN, train_precision, train_recall, train_f1, "||", val_mae,
@@ -346,20 +275,25 @@ for epoch in range(0, 2):
                 s[i] = str(round(x, 4))
         f.write("%s\n" % ' | '.join(s))
 
-model_name = f'{stats_dir}/model.pth'
-torch.save({"model": best_model.state_dict()}, model_name)
+model_name = f'{stats_dir}/model-{MODEL_MODE}.pth'
+if best_state is None:
+    raise RuntimeError("No valid validation checkpoint was produced")
+torch.save({
+    "format_version": 1,
+    "model_mode": MODEL_MODE,
+    "config_overrides": model_overrides,
+    "model": best_state,
+    "best_val_f1": best_f1,
+}, model_name)
 
-# Inference on test set
+# Inference on test set using the same notebook-selected architecture.
 print(f"Inference on test set using best model: {model_name}")
-# load_model(CONFIG_PATH, model_name)
-
-# Rebuild tiny model and load saved weights
-from groundingdino.util.misc import clean_state_dict
-
-model = build_model(args)
-checkpoint = torch.load(model_name, map_location="cpu")
-model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
-model = model.to(device)
+model, args, _ = build_model_for_mode(
+    CONFIG_PATH, MODEL_MODE, device=device, text_encoder=TEXT_ENCODER,
+    extra_overrides={"anno_path": ANNOTATIONS_PATH},
+)
+checkpoint, _, _ = load_checkpoint(model, model_name, requested_mode=MODEL_MODE, strict=True)
+model = set_finetuning_mode(freeze_encoders(model))
 model.eval()
 test_mae, test_rmse, test_TP, test_FP, test_FN, test_precision, test_recall, test_f1 = eval('test', -1)
 print(

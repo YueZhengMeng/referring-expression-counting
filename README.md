@@ -7,12 +7,12 @@ Official implementation of CVPR 2024 paper 'Referring Expression Counting'.
 ## Dataset download
 
 Annotations for the REC-8K dataset are
-available [here](https://drive.google.com/file/d/1K3E7fd3D12L3-AlBhmOGRD73-KaOWYkK/view?usp=sharing).
-Unzip the downloaded anno.zip file under the project root folder.
+available [here](https://drive.google.com/file/d/1K3E7fd3D12L3-AlBhmOGRD73-KaOWYkK/view?usp=sharing). Unzip the
+downloaded anno.zip file under the project root folder.
 
 REC-8K images are selected from below datasets and partially collected from the internet for diverse scenes and object
-attributes.
-Due to the restriction of the original dataset license, we provide the original download links for the datasets.
+attributes. Due to the restriction of the original dataset license, we provide the original download links for the
+datasets.
 
 | Data Source            | Link                                                                                                                      | Remark                                    |
 |------------------------|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------|
@@ -27,8 +27,8 @@ Due to the restriction of the original dataset license, we provide the original 
 | JHU-CROWD++ [8]        | [download](http://www.crowd-counting.com/#download)                                                                       |                                           |
 
 After downloading the datasets, rearrange the dataset folder structure as below and run the `data_preprocess.py` script
-to extract & rename the images for the REC-8K dataset.
-The resulting REC-8K images will be saved in the '<DATA_ROOT>/rec-8k' folder.
+to extract & rename the images for the REC-8K dataset. The resulting REC-8K images will be saved in the '<DATA_ROOT>
+/rec-8k' folder.
 
 ```
 - <DATA_ROOT>/
@@ -53,17 +53,23 @@ wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alp
 
 ## Training and evaluation
 
-To train and evaluate the model, run the following command.
+`train_test.py` intentionally remains a notebook-style script for local data-flow and fine-tuning experiments. Edit its
+constants near the top before running it:
+`MODEL_MODE` can be `tiny` (the default laptop/debug configuration),
+`compact_rec`, or `full`. Tiny checkpoints must not be evaluated with the full architecture. The image directory,
+annotation paths, BERT path, device and checkpoint paths are also explicit constants; no project code requires an
+`F:` drive.
 
-```
-<!-- build venv -->
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-<!-- train -->
-python train_test.py
+For standalone evaluation, use the architecture metadata saved by training:
 
+```sh
+python inference.py --checkpoint ./stats/model-tiny.pth \
+  --model-mode tiny --image-dir /path/to/rec-8k \
+  --annotations anno/annotations.json --splits anno/splits.json
 ```
+
+Use `--device cpu`, `--device cuda`, or `--device cuda:0` as appropriate. New checkpoints are loaded strictly and
+contain their model mode. Legacy checkpoints without metadata require an explicit `--model-mode`.
 
 ## Acknowledgement
 
@@ -88,7 +94,7 @@ pretrained model.
 6. Qi Wang, Junyu Gao, Wei Lin, and Xuelong Li. Nwpucrowd: A large-scale benchmark for crowd counting and localization.
    IEEE Transactions on Pattern Analysis and Machine Intelligence, 2020.
 7. Pengfei Zhu, Longyin Wen, Dawei Du, Xiao Bian, Heng Fan, Qinghua Hu, and Haibin Ling. Detection and tracking meet
-   drones challenge. IEEE Transactions on Pattern Analysis and Machine Intelligence, 44(11):7380–7399, 2021.
+   drones challenge. IEEE Transactions on Pattern Analysis and Machine Intelligence, 44 (11):7380–7399, 2021.
 8. Vishwanath A Sindagi, Rajeev Yasarla, and Vishal M Patel. Jhu-crowd++: Large-scale crowd counting dataset and a
    benchmark method. Technical Report, 2020.
 9. Shilong Liu, Zhaoyang Zeng, Tianhe Ren, Feng Li, Hao Zhang, Jie Yang, Chunyuan Li, Jianwei Yang, Hang Su, Jun Zhu, et

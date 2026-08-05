@@ -42,6 +42,21 @@ def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
     return image, image_transformed
 
 
+def _valid_caption_token_indices(tokenizer, caption):
+    encoded = tokenizer(caption, return_tensors="pt", return_special_tokens_mask=True)
+    ids = encoded["input_ids"][0]
+    attention = encoded["attention_mask"][0].bool()
+    special = encoded.get("special_tokens_mask", torch.zeros_like(attention.unsqueeze(0)))[0].bool()
+    punctuation = tokenizer(".", add_special_tokens=False)["input_ids"]
+    punctuation = set(punctuation[0] if punctuation and isinstance(punctuation[0], list) else punctuation)
+    content = [int(i) for i in torch.where(attention & ~special)[0]
+               if int(ids[i]) not in punctuation]
+    cls = 0
+    if getattr(tokenizer, "cls_token_id", None) in ids.tolist():
+        cls = ids.tolist().index(tokenizer.cls_token_id)
+    return cls, content
+
+
 def threshold(
         outputs,
         captions: str,
@@ -53,26 +68,23 @@ def threshold(
 
     ret = []
     for b in range(bs):
-        prediction_logits = outputs["pred_logits"].cpu().sigmoid()[b]
-        prediction_boxes = outputs["pred_boxes"].cpu()[b]
-
-        tokenized = tokenizer(captions[b])
-        input_ids = tokenized['input_ids']
-        end_idx = np.where(np.array(input_ids) == 1012)[0][-1]
-
-        # Keep a query only when its global score and all local tokens pass.
-        mask1 = prediction_logits[:, 0].gt(box_threshold)
-        mask2 = prediction_logits[:, 1:end_idx].gt(token_threshold).all(dim=1)
+        prediction_logits = outputs["pred_logits"].detach().cpu().sigmoid()[b]
+        prediction_boxes = outputs["pred_boxes"].detach().cpu()[b]
+        tokenized = tokenizer(captions[b], return_tensors="pt", return_special_tokens_mask=True)
+        cls_index, content_indices = _valid_caption_token_indices(tokenizer, captions[b])
+        mask1 = prediction_logits[:, cls_index].gt(box_threshold)
+        if content_indices:
+            local_scores = prediction_logits[:, content_indices]
+            mask2 = local_scores.gt(token_threshold).all(dim=1)
+        else:
+            mask2 = torch.ones(prediction_logits.shape[0], dtype=torch.bool)
         mask = mask1 & mask2
 
         logits = prediction_logits[mask]
         boxes = prediction_boxes[mask]
-
         phrases = [
             get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace('.', '')
-            for logit
-            in logits
+            for logit in logits
         ]
         ret.append((boxes, logits.max(dim=1)[0], phrases))
-
     return ret

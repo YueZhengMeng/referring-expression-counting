@@ -33,6 +33,7 @@ from .bertwarper import (
     BertModelWarper,
     generate_masks_with_special_tokens_and_transfer_map,
 )
+from .text_masks import _role_mask
 from .transformer import build_transformer
 from .utils import MLP, ContrastiveEmbed
 from ..registry import MODULE_BUILD_FUNCS
@@ -92,7 +93,7 @@ class GroundingDINO(nn.Module):
         self.hidden_dim = hidden_dim = transformer.d_model
         self.num_feature_levels = num_feature_levels
         self.nheads = nheads
-        self.max_text_len = 256
+        self.max_text_len = max_text_len
         self.sub_sentence_present = sub_sentence_present
 
         # setting query dim
@@ -244,13 +245,19 @@ class GroundingDINO(nn.Module):
             contexts.append(context)  # ['on table.', 'on ground.', '...', '...']
             attributes.append(att)  # ['blue.','yellow.', '...', '...']
 
-        tokenized_subject = self.tokenizer(subjects, padding="longest", return_tensors="pt").to(samples.device)
-        tokenized_context = self.tokenizer(contexts, padding="longest", return_tensors="pt").to(samples.device)
+        # encoder texts. Keep offsets only for constructing exact role masks;
+        # they are removed before calling BERT.
+        tokenized = self.tokenizer(
+            captions,
+            padding="longest",
+            return_tensors="pt",
+            return_special_tokens_mask=True,
+            return_offsets_mapping=True,
+        ).to(samples.device)
 
-        tokenized_attribute = self.tokenizer(attributes, padding="longest", return_tensors="pt").to(samples.device)
-
-        # encoder texts
-        tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt").to(samples.device)
+        tokenized_attribute = self.tokenizer(
+            attributes, padding="longest", return_tensors="pt"
+        ).to(samples.device)
 
         (
             text_self_attention_masks,
@@ -268,39 +275,48 @@ class GroundingDINO(nn.Module):
             tokenized["input_ids"] = tokenized["input_ids"][:, : self.max_text_len]
             tokenized["attention_mask"] = tokenized["attention_mask"][:, : self.max_text_len]
             tokenized["token_type_ids"] = tokenized["token_type_ids"][:, : self.max_text_len]
+            tokenized["special_tokens_mask"] = tokenized["special_tokens_mask"][:, : self.max_text_len]
+            tokenized["offset_mapping"] = tokenized["offset_mapping"][:, : self.max_text_len]
 
-        # extract text embeddings
+        # extract text embeddings; offsets and special-token metadata are not
+        # valid BERT inputs and are removed before the encoder call.
         if self.sub_sentence_present:
-            tokenized_for_encoder = {k: v for k, v in tokenized.items() if k != "attention_mask"}
+            tokenized_for_encoder = {
+                k: v for k, v in tokenized.items()
+                if k not in {"attention_mask", "special_tokens_mask", "offset_mapping"}
+            }
             tokenized_for_encoder["attention_mask"] = text_self_attention_masks
             tokenized_for_encoder["position_ids"] = position_ids
         else:
-            # import ipdb; ipdb.set_trace()
-            tokenized_for_encoder = tokenized
+            tokenized_for_encoder = {
+                k: v for k, v in tokenized.items()
+                if k not in {"special_tokens_mask", "offset_mapping"}
+            }
 
         bert_output = self.bert(**tokenized_for_encoder)
 
         encoded_text = self.feat_map(bert_output["last_hidden_state"])
-        text_token_mask = tokenized.attention_mask.bool()
-
-        mask = tokenized["attention_mask"].bool()
-        attr_mask = tokenized["attention_mask"].bool()
-
-        text_subject_mask = (tokenized["input_ids"].unsqueeze(2) == tokenized_subject["input_ids"].unsqueeze(1)).any(
-            dim=2) & mask
-        text_context_mask = (tokenized["input_ids"].unsqueeze(2) == tokenized_context["input_ids"].unsqueeze(1)).any(
-            dim=2) & mask
-        text_attribute_mask = (tokenized["input_ids"].unsqueeze(2) == tokenized_attribute["input_ids"].unsqueeze(
-            1)).any(dim=2) & attr_mask
+        text_token_mask = tokenized["attention_mask"].bool()
+        special_token_mask = tokenized["special_tokens_mask"].bool()
+        text_subject_mask = _role_mask(
+            self.tokenizer, captions, subjects, tokenized["input_ids"],
+            tokenized["offset_mapping"], text_token_mask, special_token_mask
+        )
+        text_context_mask = _role_mask(
+            self.tokenizer, captions, contexts, tokenized["input_ids"],
+            tokenized["offset_mapping"], text_token_mask, special_token_mask
+        )
+        text_attribute_mask = _role_mask(
+            self.tokenizer, captions, attributes, tokenized["input_ids"],
+            tokenized["offset_mapping"], text_token_mask, special_token_mask
+        )
 
         if encoded_text.shape[1] > self.max_text_len:
             encoded_text = encoded_text[:, : self.max_text_len, :]
             text_token_mask = text_token_mask[:, : self.max_text_len]
-
             text_subject_mask = text_subject_mask[:, : self.max_text_len]
             text_context_mask = text_context_mask[:, : self.max_text_len]
             text_attribute_mask = text_attribute_mask[:, : self.max_text_len]
-
             position_ids = position_ids[:, : self.max_text_len]
             text_self_attention_masks = text_self_attention_masks[
                 :, : self.max_text_len, : self.max_text_len
@@ -367,7 +383,9 @@ class GroundingDINO(nn.Module):
 
         token_masks = text_dict["text_attribute_mask"]
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1], "img_embs": hs[-1],
-               "txt_embs": txt_embs, "token_masks": token_masks}
+               "txt_embs": txt_embs, "token_masks": token_masks,
+               "text_token_mask": text_dict["text_token_mask"],
+               "attribute_token_mask": text_dict["text_attribute_mask"]}
 
         return out
 

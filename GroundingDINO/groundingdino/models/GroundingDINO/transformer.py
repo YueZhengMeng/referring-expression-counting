@@ -342,11 +342,14 @@ class Transformer(nn.Module):
             )
 
             if self.embed_init_tgt:
-                tgt_ = (
+                learned_tgt = (
                     self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
                 )
+                # Preserve GroundingDINO's learned query initialization while
+                # exposing the language-guided global-local features to the decoder.
+                tgt_ = learned_tgt + tgt_undetach
             else:
-                tgt_ = tgt_undetach.detach()
+                tgt_ = tgt_undetach
 
             if refpoint_embed is not None:
                 refpoint_embed = torch.cat([refpoint_embed, refpoint_embed_], dim=1)
@@ -1053,7 +1056,7 @@ def _apply_subject_and_context_attention(
         encoded_text,
         subject_mask,
     )
-    valid_context_rows = context_mask.sum(dim=1) > 2  # More than [CLS] and [SEP].
+    valid_context_rows = context_mask.any(dim=1)
     higher_tokens = _apply_text_cross_attention(
         cross_attention,
         higher_tokens,
