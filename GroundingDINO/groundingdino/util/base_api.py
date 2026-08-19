@@ -22,7 +22,10 @@ def load_model(model_config_path: str, model_checkpoint_path: str, device: str =
     args = SLConfig.fromfile(model_config_path)
     args.device = device
     model = build_model(args)
+    # 加载检查点（映射到 CPU 避免显存占用）
     checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
+    # clean_state_dict 清洗键名（若需要）
+    # 加载参数到模型，strict=False 允许部分匹配
     model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
     model.eval()
     return model
@@ -61,7 +64,7 @@ def threshold(
         outputs,
         captions: str,
         tokenizer,
-        text_threshold: float,
+        text_threshold: float=0.25,
         box_threshold: float = 0.25,
         token_threshold: float = 0.35):
     bs = outputs["pred_logits"].shape[0]

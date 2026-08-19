@@ -166,3 +166,10 @@ cython_debug/
 .claude
 
 /case_study_output
+
+groundingDINO.txt
+groundingREC.txt
+
+temp.ipynb
+
+2024_CVPR_Referring Expression Counting.pdf

@@ -14,17 +14,11 @@ import torch
 from PIL import Image
 
 sys.path.append('GroundingDINO')
-from groundingdino.util.base_api import threshold
+from groundingdino.util.base_api import threshold, load_model
 
-from utils.evaluation import calc_loc_metric, prepare_targets as _prepare_targets
+from utils.evaluation import calc_loc_metric, prepare_targets
 from utils.image_loader import get_loader
-from utils.model_utils import (build_model_for_mode, freeze_encoders,
-                               resolve_device, set_finetuning_mode)
 from utils.processor import DataProcessor
-
-TEXT_TRESHOLD = 0.25
-BOX_THRESHOLD = 0.25
-TOKEN_THRESHOLD = 0.35
 
 
 def sanitize_filename(s):
@@ -32,20 +26,20 @@ def sanitize_filename(s):
     return re.sub(r'[<>:"/\\|?*\s]', '_', s)
 
 
-def visualize_prediction(image_path, gt_points_pixel, pred_points_norm, shape, caption, save_path):
+def visualize_prediction(image_path, gt_points_pixel, pred_points_norm, caption, save_path):
     """Draw ground-truth (green circles) and predicted (red crosses) points on the image.
 
     Args:
         image_path: path to the original image file.
         gt_points_pixel: list of [x, y] in pixel coordinates.
-        pred_points_norm: list of [x, y] in normalised [0, 1] coordinates.
+        pred_points_norm: list of [x, y] in normalized [0, 1] coordinates.
         shape: (h, w) of the original image.
         caption: the referring-expression caption to display as title.
         save_path: where to save the resulting figure.
     """
     img = Image.open(image_path).convert("RGB")
     img = np.array(img)
-    h, w = shape
+    h, w = img.shape[0], img.shape[1]
 
     fig, ax = plt.subplots(1, 1, figsize=(10, 8))
     ax.imshow(img)
@@ -57,17 +51,21 @@ def visualize_prediction(image_path, gt_points_pixel, pred_points_norm, shape, c
                    edgecolors='darkgreen', linewidths=1.5,
                    label=f'GT ({len(gt_pts)})', zorder=5)
 
-    # Predicted points — red crosses (convert normalised → pixel)
+    # Predicted points — red crosses (convert normalized → pixel)
     if len(pred_points_norm) > 0:
         pred_pts = np.asarray(pred_points_norm, dtype=np.float64).copy()
         if pred_pts.ndim != 2 or pred_pts.shape[1] < 2:
             raise ValueError(f"Expected predicted points with shape (N, 2), got {pred_pts.shape}")
+
+        # 取出中心点坐标，去掉边界框宽高
         pred_pts = pred_pts[:, :2]
+        # 去掉无效值点和图片边界外的点
         finite_mask = np.isfinite(pred_pts).all(axis=1)
         in_image_mask = ((pred_pts >= 0.0) & (pred_pts <= 1.0)).all(axis=1)
         valid_mask = finite_mask & in_image_mask
         if not valid_mask.all():
             print(f"  [WARN] ignoring {int((~valid_mask).sum())} invalid normalized predictions for {image_path}")
+        # 取出有效点
         pred_pts = pred_pts[valid_mask]
         if len(pred_pts) > 0:
             pred_pts[:, 0] *= w
@@ -86,15 +84,10 @@ def visualize_prediction(image_path, gt_points_pixel, pred_points_norm, shape, c
     plt.close(fig)
 
 
-def eval(model, loader, annotations, image_dir, output_dir, split,
-         box_threshold=BOX_THRESHOLD, token_threshold=TOKEN_THRESHOLD):
+def eval(model, loader, annotations,
+         image_dir, output_dir, split, text_threshold, box_threshold, token_threshold):
     print(f"Inference on {split} set")
     model.eval()
-
-    # --- set up output directories ---
-    vis_dir = os.path.join(output_dir, "visualizations")
-    os.makedirs(vis_dir, exist_ok=True)
-    csv_path = os.path.join(output_dir, "case_study_results.csv")
 
     eval_mae = 0
     eval_rmse = 0
@@ -105,6 +98,11 @@ def eval(model, loader, annotations, image_dir, output_dir, split,
 
     counter = 0
     eval_size = sum(len(tuples) for tuples in loader.dataset.img_cap_tuples)
+
+    # --- set up output directories ---
+    vis_dir = os.path.join(output_dir, "visualizations")
+    os.makedirs(vis_dir, exist_ok=True)
+    csv_path = os.path.join(output_dir, "case_study_results.csv")
 
     # --- open CSV writer ---
     csv_file = open(csv_path, 'w', newline='', encoding='utf-8')
@@ -141,9 +139,8 @@ def eval(model, loader, annotations, image_dir, output_dir, split,
             max_text_len=model.max_text_len,
         )
 
-        results = threshold(
-            outputs, captions, model.tokenizer, TEXT_TRESHOLD,
-            box_threshold=box_threshold, token_threshold=token_threshold)
+        results = threshold(outputs, captions, model.tokenizer, text_threshold=text_threshold,
+                            box_threshold=box_threshold, token_threshold=token_threshold)
         for b in range(len(results)):
             boxes, logits, phrases = results[b]
             boxes = [box.tolist() for box in boxes]
@@ -178,7 +175,7 @@ def eval(model, loader, annotations, image_dir, output_dir, split,
             vis_path = os.path.join(vis_dir, vis_filename)
             try:
                 visualize_prediction(image_path, orig_gt_points[b], points,
-                                     shapes[b], captions[b], vis_path)
+                                     captions[b], vis_path)
             except FileNotFoundError:
                 vis_path = 'FILE_NOT_FOUND'
                 print(f"  [WARN] image not found: {image_path}")
@@ -212,55 +209,49 @@ def eval(model, loader, annotations, image_dir, output_dir, split,
     return eval_mae, eval_rmse, eval_tp, eval_fp, eval_fn, eval_precision, eval_recall, eval_f1
 
 
-def prepare_targets(*args, **kwargs):
-    """Backward-compatible import shim for callers of the old module."""
-    return _prepare_targets(*args, **kwargs)
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Inference on train/val/test sets')
-    parser.add_argument('--checkpoint', type=str, required=True,
+    parser.add_argument('--checkpoint', type=str,
+                        default="F:/GroundingREC/rec_model.pth",
                         help='Path to the model checkpoint (.pth file)')
     parser.add_argument('--config', type=str,
                         default='GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py')
-    parser.add_argument('--model-mode', choices=['auto', 'full', 'compact_rec', 'tiny'], default='auto')
-    parser.add_argument('--device', default='auto')
-    parser.add_argument('--image-dir', required=True)
-    parser.add_argument('--annotations', default='anno/annotations.json')
-    parser.add_argument('--splits', default='anno/splits.json')
-    parser.add_argument('--text-encoder', default=None)
+    parser.add_argument('--device',
+                        default='auto')
+    parser.add_argument('--image-dir',
+                        default="F:/REC-8K/rec-8k")
+    parser.add_argument('--annotations',
+                        default='anno/annotations.json')
+    parser.add_argument('--splits',
+                        default='anno/splits.json')
+    parser.add_argument('--text-encoder',
+                        default=None)
     parser.add_argument('--split', type=str,
                         default='test',
                         choices=['train', 'val', 'test'],
                         help='Split to evaluate on')
-    parser.add_argument('--batch_size', '--batch-size', type=int, default=2,
+    parser.add_argument('--batch_size', '--batch-size', type=int,
+                        default=1,
                         help='Batch size for data loaders')
     parser.add_argument('--output_dir', '--output-dir', type=str,
                         default='./case_study_output',
                         help='Directory to save visualizations and CSV')
+    parser.add_argument('--text_threshold', type=float,
+                        default=0.25,
+                        help='Minimum text score for keeping a prediction')
     parser.add_argument('--box_threshold', type=float,
-                        default=BOX_THRESHOLD,
+                        default=0.25,
                         help='Minimum global score for keeping a prediction')
     parser.add_argument('--token_threshold', type=float,
-                        default=TOKEN_THRESHOLD,
+                        default=0.35,
                         help='Minimum local token score for keeping a prediction')
     args = parser.parse_args()
 
-    device = resolve_device(args.device)
-    checkpoint = torch.load(args.checkpoint, map_location='cpu')
-    if checkpoint.get("model_mode") is not None:
-        stored_mode = checkpoint["model_mode"]
-        if args.model_mode != "auto" and args.model_mode != stored_mode:
-            raise ValueError(f"Checkpoint mode is {stored_mode}, requested {args.model_mode}")
-    mode = checkpoint.get("model_mode", args.model_mode)
-    if mode == "auto":
-        raise ValueError("Legacy checkpoint requires --model-mode full or tiny")
-    model, _, _ = build_model_for_mode(
-        args.config, mode, device=device, text_encoder=args.text_encoder,
-        extra_overrides={"anno_path": args.annotations},
-    )
-    model.load_state_dict(checkpoint.get('model', checkpoint), strict=True)
-    model = set_finetuning_mode(freeze_encoders(model)).eval()
+    """ model """
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Loading model from checkpoint: {args.checkpoint}")
+    model = load_model(args.config, args.checkpoint, device=device)
+    model = model.to(device)
 
     """ data """
     processor = DataProcessor(args.image_dir, args.annotations, args.splits)
@@ -278,7 +269,7 @@ if __name__ == '__main__':
     output_dir = os.path.join(args.output_dir, split)
     mae, rmse, TP, FP, FN, precision, recall, f1 = eval(
         model, loader, annotations, image_dir, output_dir, split,
-        box_threshold=args.box_threshold, token_threshold=args.token_threshold)
+        args.text_threshold, args.box_threshold, args.token_threshold)
     print(
         f'[{split}] MAE: {mae:5.2f}, RMSE: {rmse:5.2f}, TP: {TP}, FP: {FP}, FN: {FN}, '
         f'precision: {precision:5.2f}, recall: {recall:5.2f}, F1: {f1:5.2f}'

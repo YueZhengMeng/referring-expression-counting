@@ -187,7 +187,9 @@ def eval(split, epoch=None, *, box_threshold=BOX_THRESHOLD, token_threshold=TOKE
         emb_size = outputs["pred_logits"].shape[2]
         targets = prepare_targets(
             anno_b, captions, shapes, model.tokenizer, emb_size,
-            image_group_ids=mask_bi, device=device, max_text_len=model.max_text_len
+            image_group_ids=[i for i, caps in enumerate(img_caps) for _ in caps],
+            device=device,
+            max_text_len=model.max_text_len
         )
 
         counter_for_image += 1
