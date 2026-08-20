@@ -1,3 +1,5 @@
+import os
+
 from transformers import AutoTokenizer, BertModel, RobertaModel, RobertaTokenizerFast
 
 
@@ -8,6 +10,8 @@ def get_tokenlizer(text_encoder_type):
             text_encoder_type = text_encoder_type.text_encoder_type
         elif text_encoder_type.get("text_encoder_type", False):
             text_encoder_type = text_encoder_type.get("text_encoder_type")
+        elif os.path.isdir(text_encoder_type) and os.path.exists(text_encoder_type):
+            pass
         else:
             raise ValueError(
                 "Unknown type of text_encoder_type: {}".format(type(text_encoder_type))

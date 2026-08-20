@@ -183,11 +183,11 @@ def build_backbone(args):
             args.backbone,
             train_backbone,
             args.dilation,
-            return_interm_indices,  # [1, 2, 3]
+            return_interm_indices,
             batch_norm=FrozenBatchNorm2d,
         )
         bb_num_channels = backbone.num_channels
-    elif args.backbone in [  # is swin_T_224_1k
+    elif args.backbone in [
         "swin_T_224_1k",
         "swin_B_224_22k",
         "swin_B_384_22k",

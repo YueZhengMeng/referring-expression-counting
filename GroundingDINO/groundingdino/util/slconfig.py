@@ -2,8 +2,8 @@
 # Modified from mmcv
 # ==========================================================
 import ast
+import os
 import os.path as osp
-import platform
 import shutil
 import sys
 import tempfile
@@ -81,7 +81,7 @@ class SLConfig(object):
             with tempfile.TemporaryDirectory() as temp_config_dir:
                 temp_config_file = tempfile.NamedTemporaryFile(dir=temp_config_dir, suffix=".py")
                 temp_config_name = osp.basename(temp_config_file.name)
-                if platform.system() == 'Windows':
+                if os.name == 'nt':
                     temp_config_file.close()
                 shutil.copyfile(filename, osp.join(temp_config_dir, temp_config_name))
                 temp_module_name = osp.splitext(temp_config_name)[0]

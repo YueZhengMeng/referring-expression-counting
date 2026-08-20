@@ -1,6 +1,6 @@
 batch_size = 1
 modelname = "groundingdino"
-backbone = "swin_T_224_1k"
+backbone = "swin_B_384_22k"
 position_embedding = "sine"
 pe_temperatureH = 20
 pe_temperatureW = 20
@@ -31,7 +31,7 @@ dn_bbox_coef = 1.0
 embed_init_tgt = True
 dn_labelbook_size = 2000
 max_text_len = 256
-text_encoder_type = "F:\\model\\bert-base-uncased"
+text_encoder_type = "bert-base-uncased"
 use_text_enhancer = True
 use_fusion_layer = True
 use_checkpoint = True

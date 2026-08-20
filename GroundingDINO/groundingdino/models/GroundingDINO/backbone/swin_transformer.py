@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
-from timm.layers import DropPath, to_2tuple, trunc_normal_
+from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
 from groundingdino.util.misc import NestedTensor
 
@@ -769,7 +769,7 @@ def build_swin_transformer(modelname, pretrain_img_size, **kw):
     ]
 
     model_para_dict = {
-        "swin_T_224_1k": dict(  # yes
+        "swin_T_224_1k": dict(
             embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24], window_size=7
         ),
         "swin_B_224_22k": dict(
