@@ -21,7 +21,6 @@ from typing import Optional
 import torch
 import torch.utils.checkpoint as checkpoint
 from torch import Tensor, nn
-from torch.nn import functional as F
 
 from groundingdino.util.misc import inverse_sigmoid
 from .fuse_modules import BiAttentionBlock
@@ -60,7 +59,7 @@ class Transformer(nn.Module):
             # init query
             learnable_tgt_init=False,
             # two stage
-            two_stage_type="no",
+            two_stage_type="no",  # ['no', 'standard', 'early', 'combine', 'enceachlayer', 'enclayer1']
             embed_init_tgt=False,
             # for text
             use_text_enhancer=False,
@@ -85,7 +84,7 @@ class Transformer(nn.Module):
             d_model, dim_feedforward, dropout, activation, num_feature_levels, nhead, enc_n_points
         )
 
-        if use_text_enhancer:  # True
+        if use_text_enhancer:
             text_enhance_layer = TransformerEncoderLayer(
                 d_model=d_model,
                 nhead=nhead // 2,
@@ -95,7 +94,7 @@ class Transformer(nn.Module):
         else:
             text_enhance_layer = None
 
-        if use_fusion_layer:  # True
+        if use_fusion_layer:
             feature_fusion_layer = BiAttentionBlock(
                 v_dim=d_model,
                 l_dim=d_model,
@@ -116,8 +115,8 @@ class Transformer(nn.Module):
             num_queries=num_queries,
             text_enhance_layer=text_enhance_layer,
             feature_fusion_layer=feature_fusion_layer,
-            use_checkpoint=use_checkpoint,  # True
-            use_transformer_ckpt=use_transformer_ckpt,  # True
+            use_checkpoint=use_checkpoint,
+            use_transformer_ckpt=use_transformer_ckpt,
         )
 
         # choose decoder layer type
@@ -153,14 +152,14 @@ class Transformer(nn.Module):
             self.num_patterns = 0
 
         if num_feature_levels > 1:
-            if self.num_encoder_layers > 0:  # 6
+            if self.num_encoder_layers > 0:
                 self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
             else:
                 self.level_embed = None
 
         self.learnable_tgt_init = learnable_tgt_init
         assert learnable_tgt_init, "why not learnable_tgt_init"
-        self.embed_init_tgt = embed_init_tgt  # True
+        self.embed_init_tgt = embed_init_tgt
         if (two_stage_type != "no" and embed_init_tgt) or (two_stage_type == "no"):
             self.tgt_embed = nn.Embedding(self.num_queries, d_model)
             nn.init.normal_(self.tgt_embed.weight.data)
@@ -179,15 +178,10 @@ class Transformer(nn.Module):
             self.two_stage_wh_embedding = None
 
         if two_stage_type == "no":
-            self.init_ref_points(num_queries)
+            self.init_ref_points(num_queries)  # init self.refpoint_embed
 
         self.enc_out_class_embed = None
         self.enc_out_bbox_embed = None
-
-        self.cross_attention = CrossAttentionLayer(d_model)
-
-        print(
-            f"Total added parameters for cross attention: {sum(p.numel() for p in self.cross_attention.parameters())}")
 
         self._reset_parameters()
 
@@ -216,8 +210,8 @@ class Transformer(nn.Module):
     def forward(self, srcs, masks, refpoint_embed, pos_embeds, tgt, attn_mask=None, text_dict=None):
         """
         Input:
-            - srcs: List of multi features [bs, ci, hi, wi] # list of 4: [(bs, 256,100,137) (bs,256,50,69), (bs, 256,25,35), (bs, 256,13,18)]
-            - masks: List of multi masks [bs, hi, wi]      # list of 4: [(bs,100,137), (bs,50,69), (bs,25,35), (bs,13,18)]
+            - srcs: List of multi features [bs, ci, hi, wi]
+            - masks: List of multi masks [bs, hi, wi]
             - refpoint_embed: [bs, num_dn, 4]. None in infer
             - pos_embeds: List of multi pos embeds [bs, ci, hi, wi]
             - tgt: [bs, num_dn, d_model]. None in infer
@@ -233,9 +227,9 @@ class Transformer(nn.Module):
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
 
-            src = src.flatten(2).transpose(1, 2)
-            mask = mask.flatten(1)
-            pos_embed = pos_embed.flatten(2).transpose(1, 2)
+            src = src.flatten(2).transpose(1, 2)  # bs, hw, c
+            mask = mask.flatten(1)  # bs, hw
+            pos_embed = pos_embed.flatten(2).transpose(1, 2)  # bs, hw, c
             if self.num_feature_levels > 1 and self.level_embed is not None:
                 lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
             else:
@@ -256,9 +250,7 @@ class Transformer(nn.Module):
 
         # two stage
         enc_topk_proposals = enc_refpoint_embed = None
-        memory = src_flatten
-        memory_text = text_dict["encoded_text"]
-        # """ encoder
+
         #########################################################
         # Begin Encoder
         #########################################################
@@ -275,7 +267,6 @@ class Transformer(nn.Module):
             position_ids=text_dict["position_ids"],
             text_self_attention_masks=text_dict["text_self_attention_masks"],
         )
-
         #########################################################
         # End Encoder
         # - memory: bs, \sum{hw}, c
@@ -284,13 +275,10 @@ class Transformer(nn.Module):
         # - enc_intermediate_output: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
         # - enc_intermediate_refpoints: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
         #########################################################
-        # """
         text_dict["encoded_text"] = memory_text
         # if os.environ.get("SHILONG_AMP_INFNAN_DEBUG") == '1':
         #     if memory.isnan().any() | memory.isinf().any():
         #         import ipdb; ipdb.set_trace()
-
-        txt_embs = text_dict["encoded_text"]
 
         if self.two_stage_type == "standard":
             output_memory, output_proposals = gen_encoder_output_proposals(
@@ -303,53 +291,33 @@ class Transformer(nn.Module):
             else:
                 enc_outputs_class_unselected = self.enc_out_class_embed(output_memory)
 
-            topk_logits = enc_outputs_class_unselected[:, :, 0]  # (bs, \sum{hw})
-
+            topk_logits = enc_outputs_class_unselected.max(-1)[0]
             enc_outputs_coord_unselected = (
                     self.enc_out_bbox_embed(output_memory) + output_proposals
             )  # (bs, \sum{hw}, 4) unsigmoid
             topk = self.num_queries
 
-            topk_proposals = torch.topk(topk_logits, topk, dim=1)[1]  # bs, nq 
+            topk_proposals = torch.topk(topk_logits, topk, dim=1)[1]  # bs, nq
 
-            lower_idxes, higher_idxes = split_tokens(topk_proposals)
-            lower_tokens = torch.gather(output_memory, 1, lower_idxes.unsqueeze(-1).expand(-1, -1, self.d_model))
-            higher_tokens = torch.gather(output_memory, 1, higher_idxes.unsqueeze(-1).expand(-1, -1, self.d_model))
-
-            lower_tokens, higher_tokens = _apply_subject_and_context_attention(
-                self.cross_attention,
-                lower_tokens,
-                higher_tokens,
-                text_dict["encoded_text"],
-                text_dict["text_subject_mask"],
-                text_dict["text_context_mask"],
-            )
-
-            updated_lower_tokens = self.cross_attention(lower_tokens, higher_tokens)
-            output_memory = output_memory.scatter(1, lower_idxes.unsqueeze(-1).expand(-1, -1, self.d_model),
-                                                  updated_lower_tokens)
-
+            # gather boxes
             refpoint_embed_undetach = torch.gather(
                 enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
             )  # unsigmoid
             refpoint_embed_ = refpoint_embed_undetach.detach()
             init_box_proposal = torch.gather(
                 output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
-            ).sigmoid()  # sigmoid 
+            ).sigmoid()  # sigmoid
 
+            # gather tgt
             tgt_undetach = torch.gather(
                 output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)
             )
-
             if self.embed_init_tgt:
-                learned_tgt = (
+                tgt_ = (
                     self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
-                )
-                # Preserve GroundingDINO's learned query initialization while
-                # exposing the language-guided global-local features to the decoder.
-                tgt_ = learned_tgt + tgt_undetach
+                )  # nq, bs, d_model
             else:
-                tgt_ = tgt_undetach
+                tgt_ = tgt_undetach.detach()
 
             if refpoint_embed is not None:
                 refpoint_embed = torch.cat([refpoint_embed, refpoint_embed_], dim=1)
@@ -383,13 +351,10 @@ class Transformer(nn.Module):
 
         else:
             raise NotImplementedError("unknown two_stage_type {}".format(self.two_stage_type))
-
-        img_embs = tgt
-
         #########################################################
         # End preparing tgt
         # - tgt: bs, NQ, d_model
-        # - refpoint_embed(unsigmoid): bs, nq, d_model
+        # - refpoint_embed(unsigmoid): bs, NQ, d_model
         #########################################################
 
         #########################################################
@@ -411,14 +376,14 @@ class Transformer(nn.Module):
         )
         #########################################################
         # End Decoder
-        # hs: n_dec, bs, nq, d_model # list of 6
-        # references: n_dec+1, bs, nq, query_dim # list of 7
+        # hs: n_dec, bs, nq, d_model
+        # references: n_dec+1, bs, nq, query_dim
         #########################################################
 
         #########################################################
         # Begin postprocess
         #########################################################
-        if self.two_stage_type == "standard":  # yes
+        if self.two_stage_type == "standard":
             hs_enc = tgt_undetach.unsqueeze(0)
             ref_enc = refpoint_embed_undetach.sigmoid().unsqueeze(0)
         else:
@@ -429,7 +394,12 @@ class Transformer(nn.Module):
         # ref_enc: (n_enc+1, bs, nq, query_dim) or (1, bs, nq, query_dim) or (n_enc, bs, nq, d_model) or None
         #########################################################
 
-        return hs, references, hs_enc, ref_enc, init_box_proposal, img_embs, txt_embs
+        return hs, references, hs_enc, ref_enc, init_box_proposal
+        # hs: (n_dec, bs, nq, d_model)
+        # references: sigmoid coordinates. (n_dec+1, bs, bq, 4)
+        # hs_enc: (n_enc+1, bs, nq, d_model) or (1, bs, nq, d_model) or None
+        # ref_enc: sigmoid coordinates. \
+        #           (n_enc+1, bs, nq, query_dim) or (1, bs, nq, query_dim) or None
 
 
 class TransformerEncoder(nn.Module):
@@ -563,10 +533,10 @@ class TransformerEncoder(nn.Module):
                     .unsqueeze(-1)
                     .repeat(bs, 1, 1)
                 )
-                pos_text = get_sine_pos_embed(pos_text, num_pos_feats=self.d_model, exchange_xy=False)
+                pos_text = get_sine_pos_embed(pos_text, num_pos_feats=256, exchange_xy=False)
             if position_ids is not None:
                 pos_text = get_sine_pos_embed(
-                    position_ids[..., None], num_pos_feats=self.d_model, exchange_xy=False
+                    position_ids[..., None], num_pos_feats=256, exchange_xy=False
                 )
 
         # main process
@@ -701,9 +671,8 @@ class TransformerDecoder(nn.Module):
                 assert reference_points.shape[-1] == 2
                 reference_points_input = reference_points[:, :, None] * valid_ratios[None, :]
             query_sine_embed = gen_sineembed_for_position(
-                reference_points_input[:, :, 0, :],
-                num_pos_feats=self.d_model // 2,
-            )
+                reference_points_input[:, :, 0, :]
+            )  # nq, bs, 256*2
 
             # conditional query
             raw_query_pos = self.ref_point_head(query_sine_embed)  # nq, bs, 256
@@ -975,7 +944,7 @@ def build_transformer(args):
         dec_n_points=args.dec_n_points,
         learnable_tgt_init=True,
         # two stage
-        two_stage_type=args.two_stage_type,
+        two_stage_type=args.two_stage_type,  # ['no', 'standard', 'early']
         embed_init_tgt=args.embed_init_tgt,
         use_text_enhancer=args.use_text_enhancer,
         use_fusion_layer=args.use_fusion_layer,
@@ -986,91 +955,3 @@ def build_transformer(args):
         fusion_dropout=args.fusion_dropout,
         fusion_droppath=args.fusion_droppath,
     )
-
-
-class CrossAttentionLayer(nn.Module):
-    def __init__(self, d_model):
-        super(CrossAttentionLayer, self).__init__()
-        self.cross_attention = nn.MultiheadAttention(embed_dim=d_model, num_heads=8, dropout=0.1)
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, lower_tokens, higher_tokens, lower_mask=None, V_mask=None):
-        Q = lower_tokens.transpose(0, 1)
-        K = higher_tokens.transpose(0, 1)
-        V = higher_tokens.transpose(0, 1)
-        attn_output, _ = self.cross_attention(Q, K, V, key_padding_mask=V_mask)
-        # Add & norm
-        updated_lower_tokens = self.norm(attn_output.transpose(0, 1) + lower_tokens)
-        return updated_lower_tokens
-
-
-def _pad_selected_text_tokens(encoded_text, selection_mask):
-    selected_text_tokens = [text[mask] for text, mask in zip(encoded_text, selection_mask)]
-    max_size = encoded_text.size(1)
-    padded_text_tokens = torch.stack(
-        [F.pad(tokens, (0, 0, 0, max_size - tokens.size(0))) for tokens in selected_text_tokens]
-    )
-    valid_lengths = selection_mask.sum(dim=1)
-    positions = torch.arange(max_size, device=encoded_text.device).unsqueeze(0)
-    key_padding_mask = positions >= valid_lengths.unsqueeze(1)
-    return padded_text_tokens, key_padding_mask
-
-
-def _apply_text_cross_attention(
-        cross_attention,
-        query_tokens,
-        encoded_text,
-        selection_mask,
-        active_rows=None,
-):
-    if active_rows is None:
-        active_rows = torch.ones(query_tokens.size(0), dtype=torch.bool, device=query_tokens.device)
-
-    active_indices = torch.nonzero(active_rows, as_tuple=False).flatten()
-    if active_indices.numel() == 0:
-        return query_tokens
-
-    active_text, key_padding_mask = _pad_selected_text_tokens(
-        encoded_text.index_select(0, active_indices),
-        selection_mask.index_select(0, active_indices),
-    )
-    updated_tokens = cross_attention(
-        query_tokens.index_select(0, active_indices),
-        active_text,
-        V_mask=key_padding_mask,
-    )
-    return query_tokens.index_copy(0, active_indices, updated_tokens)
-
-
-def _apply_subject_and_context_attention(
-        cross_attention,
-        lower_tokens,
-        higher_tokens,
-        encoded_text,
-        subject_mask,
-        context_mask,
-):
-    lower_tokens = _apply_text_cross_attention(
-        cross_attention,
-        lower_tokens,
-        encoded_text,
-        subject_mask,
-    )
-    valid_context_rows = context_mask.any(dim=1)
-    higher_tokens = _apply_text_cross_attention(
-        cross_attention,
-        higher_tokens,
-        encoded_text,
-        context_mask,
-        valid_context_rows,
-    )
-    return lower_tokens, higher_tokens
-
-
-def split_tokens(topk_proposals):
-    sorted = torch.sort(topk_proposals, dim=1, descending=False)[0]
-    num_lower = int(0.9 * topk_proposals.size(1))
-    lower_idxes = sorted[:, :num_lower]
-    higher_idxes = sorted[:, num_lower:]
-
-    return lower_idxes, higher_idxes

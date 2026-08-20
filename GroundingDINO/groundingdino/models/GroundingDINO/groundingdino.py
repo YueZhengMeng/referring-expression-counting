@@ -15,12 +15,12 @@
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
 # ------------------------------------------------------------------------
 import copy
-import json
 from typing import List
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import RobertaTokenizerFast
 
 from groundingdino.util import get_tokenlizer
 from groundingdino.util.misc import (
@@ -33,7 +33,6 @@ from .bertwarper import (
     BertModelWarper,
     generate_masks_with_special_tokens_and_transfer_map,
 )
-from .text_masks import _role_mask
 from .transformer import build_transformer
 from .utils import MLP, ContrastiveEmbed
 from ..registry import MODULE_BUILD_FUNCS
@@ -53,7 +52,7 @@ class GroundingDINO(nn.Module):
             num_feature_levels=1,
             nheads=8,
             # two stage
-            two_stage_type="no",
+            two_stage_type="no",  # ['no', 'standard']
             dec_pred_bbox_embed_share=True,
             two_stage_class_embed_share=True,
             two_stage_bbox_embed_share=True,
@@ -65,7 +64,6 @@ class GroundingDINO(nn.Module):
             text_encoder_type="bert-base-uncased",
             sub_sentence_present=True,
             max_text_len=256,
-            anno_path=None,
     ):
         """Initializes the model.
         Parameters:
@@ -75,25 +73,13 @@ class GroundingDINO(nn.Module):
                          Conditional DETR can detect in a single image. For COCO, we recommend 100 queries.
             aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
         """
-        if anno_path:
-            with open(anno_path, "r") as f:
-                anno = json.load(f)
-                # keep unique cap
-                self.anno = {}
-                for img, caps in anno.items():
-                    for cap, items in caps.items():
-                        if cap not in self.anno:
-                            # delete points from items dict
-                            items.pop('points', None)
-                            self.anno[cap] = items
-
         super().__init__()
         self.num_queries = num_queries
         self.transformer = transformer
         self.hidden_dim = hidden_dim = transformer.d_model
         self.num_feature_levels = num_feature_levels
         self.nheads = nheads
-        self.max_text_len = max_text_len
+        self.max_text_len = 256
         self.sub_sentence_present = sub_sentence_present
 
         # setting query dim
@@ -228,37 +214,16 @@ class GroundingDINO(nn.Module):
            - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
                             dictionnaries containing the two above keys for each decoder layer.
         """
-        if isinstance(samples, (list, torch.Tensor)):
-            samples = nested_tensor_from_tensor_list(samples)
-
         if targets is None:
             captions = kw["captions"]
         else:
             captions = [t["caption"] for t in targets]
         len(captions)
 
-        # split captions to subject and context
-        subjects, contexts, attributes = [], [], []
-        for caption in captions:
-            subject, context, att = split_caption(caption, self.anno)
-            subjects.append(subject)  # ['blue box.', 'yellow box.', '...', '...']
-            contexts.append(context)  # ['on table.', 'on ground.', '...', '...']
-            attributes.append(att)  # ['blue.','yellow.', '...', '...']
-
-        # encoder texts. Keep offsets only for constructing exact role masks;
-        # they are removed before calling BERT.
-        tokenized = self.tokenizer(
-            captions,
-            padding="longest",
-            return_tensors="pt",
-            return_special_tokens_mask=True,
-            return_offsets_mapping=True,
-        ).to(samples.device)
-
-        tokenized_attribute = self.tokenizer(
-            attributes, padding="longest", return_tensors="pt"
-        ).to(samples.device)
-
+        # encoder texts
+        tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt").to(
+            samples.device
+        )
         (
             text_self_attention_masks,
             position_ids,
@@ -275,67 +240,44 @@ class GroundingDINO(nn.Module):
             tokenized["input_ids"] = tokenized["input_ids"][:, : self.max_text_len]
             tokenized["attention_mask"] = tokenized["attention_mask"][:, : self.max_text_len]
             tokenized["token_type_ids"] = tokenized["token_type_ids"][:, : self.max_text_len]
-            tokenized["special_tokens_mask"] = tokenized["special_tokens_mask"][:, : self.max_text_len]
-            tokenized["offset_mapping"] = tokenized["offset_mapping"][:, : self.max_text_len]
 
-        # extract text embeddings; offsets and special-token metadata are not
-        # valid BERT inputs and are removed before the encoder call.
+        # extract text embeddings
         if self.sub_sentence_present:
-            tokenized_for_encoder = {
-                k: v for k, v in tokenized.items()
-                if k not in {"attention_mask", "special_tokens_mask", "offset_mapping"}
-            }
+            tokenized_for_encoder = {k: v for k, v in tokenized.items() if k != "attention_mask"}
             tokenized_for_encoder["attention_mask"] = text_self_attention_masks
             tokenized_for_encoder["position_ids"] = position_ids
         else:
-            tokenized_for_encoder = {
-                k: v for k, v in tokenized.items()
-                if k not in {"special_tokens_mask", "offset_mapping"}
-            }
+            # import ipdb; ipdb.set_trace()
+            tokenized_for_encoder = tokenized
 
-        bert_output = self.bert(**tokenized_for_encoder)
+        bert_output = self.bert(**tokenized_for_encoder)  # bs, 195, 768
 
-        encoded_text = self.feat_map(bert_output["last_hidden_state"])
-        text_token_mask = tokenized["attention_mask"].bool()
-        special_token_mask = tokenized["special_tokens_mask"].bool()
-        text_subject_mask = _role_mask(
-            self.tokenizer, captions, subjects, tokenized["input_ids"],
-            tokenized["offset_mapping"], text_token_mask, special_token_mask
-        )
-        text_context_mask = _role_mask(
-            self.tokenizer, captions, contexts, tokenized["input_ids"],
-            tokenized["offset_mapping"], text_token_mask, special_token_mask
-        )
-        text_attribute_mask = _role_mask(
-            self.tokenizer, captions, attributes, tokenized["input_ids"],
-            tokenized["offset_mapping"], text_token_mask, special_token_mask
-        )
+        encoded_text = self.feat_map(bert_output["last_hidden_state"])  # bs, 195, d_model
+        text_token_mask = tokenized.attention_mask.bool()  # bs, 195
+        # text_token_mask: True for nomask, False for mask
+        # text_self_attention_masks: True for nomask, False for mask
 
         if encoded_text.shape[1] > self.max_text_len:
             encoded_text = encoded_text[:, : self.max_text_len, :]
             text_token_mask = text_token_mask[:, : self.max_text_len]
-            text_subject_mask = text_subject_mask[:, : self.max_text_len]
-            text_context_mask = text_context_mask[:, : self.max_text_len]
-            text_attribute_mask = text_attribute_mask[:, : self.max_text_len]
             position_ids = position_ids[:, : self.max_text_len]
             text_self_attention_masks = text_self_attention_masks[
                 :, : self.max_text_len, : self.max_text_len
             ]
 
         text_dict = {
-            "encoded_text": encoded_text,
-            "text_token_mask": text_token_mask,
-            "position_ids": position_ids,
-            "text_self_attention_masks": text_self_attention_masks,
-            "text_subject_mask": text_subject_mask,
-            "text_context_mask": text_context_mask,
-            "text_attribute_mask": text_attribute_mask,
+            "encoded_text": encoded_text,  # bs, 195, d_model
+            "text_token_mask": text_token_mask,  # bs, 195
+            "position_ids": position_ids,  # bs, 195
+            "text_self_attention_masks": text_self_attention_masks,  # bs, 195,195
         }
 
         # import ipdb; ipdb.set_trace()
 
-        # encoder images
+        if isinstance(samples, (list, torch.Tensor)):
+            samples = nested_tensor_from_tensor_list(samples)
         features, poss = self.backbone(samples)
+
         srcs = []
         masks = []
         for l, feat in enumerate(features):
@@ -358,7 +300,7 @@ class GroundingDINO(nn.Module):
                 poss.append(pos_l)
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
-        hs, reference, hs_enc, ref_enc, init_box_proposal, img_embs, txt_embs = self.transformer(
+        hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
             srcs, masks, input_query_bbox, poss, input_query_label, attn_mask, text_dict
         )
 
@@ -380,12 +322,19 @@ class GroundingDINO(nn.Module):
                 for layer_cls_embed, layer_hs in zip(self.class_embed, hs)
             ]
         )
+        out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1]}
 
-        token_masks = text_dict["text_attribute_mask"]
-        out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1], "img_embs": hs[-1],
-               "txt_embs": txt_embs, "token_masks": token_masks,
-               "text_token_mask": text_dict["text_token_mask"],
-               "attribute_token_mask": text_dict["text_attribute_mask"]}
+        # # for intermediate outputs
+        # if self.aux_loss:
+        #     out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord_list)
+
+        # # for encoder output
+        # if hs_enc is not None:
+        #     # prepare intermediate outputs
+        #     interm_coord = ref_enc[-1]
+        #     interm_class = self.transformer.enc_out_class_embed(hs_enc[-1], text_dict)
+        #     out['interm_outputs'] = {'pred_logits': interm_class, 'pred_boxes': interm_coord}
+        #     out['interm_outputs_for_matching_pre'] = {'pred_logits': interm_class, 'pred_boxes': init_box_proposal}
 
         return out
 
@@ -398,21 +347,6 @@ class GroundingDINO(nn.Module):
             {"pred_logits": a, "pred_boxes": b}
             for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
         ]
-
-
-def split_caption(caption, anno=None):
-    if anno is not None:
-        found = [(cap, items['type'], items['class'], items['attribute']) for cap, items in anno.items() if
-                 cap.lower() + '.' == caption.lower()]
-        if found:
-            cap, typ, cls, att = found[0]
-            if typ == 'location':
-                return cls + '.', att + '.', att + '.'
-            else:
-                return caption, "", att + '.'
-        else:
-            print("CAPTION NOT FOUND IN ANNO")
-            return caption, "", ""
 
 
 @MODULE_BUILD_FUNCS.registe_with_name(module_name="groundingdino")
@@ -445,7 +379,6 @@ def build_groundingdino(args):
         text_encoder_type=args.text_encoder_type,
         sub_sentence_present=sub_sentence_present,
         max_text_len=args.max_text_len,
-        anno_path=args.anno_path,
     )
 
     return model

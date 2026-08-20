@@ -136,7 +136,7 @@ class RandomBoxPerturber:
 
 
 def sigmoid_focal_loss(
-        inputs, targets, caption_size=None, num_boxes=None, alpha: float = 0.25, gamma: float = 2, no_reduction=False
+        inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2, no_reduction=False
 ):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
@@ -153,11 +153,8 @@ def sigmoid_focal_loss(
     Returns:
         Loss tensor
     """
-
-    prob = inputs.sigmoid()  # (bs,900,256)
-    # ce_loss = F.binary_cross_entropy(prob, targets, reduction="none") # (bs,900,256)
+    prob = inputs.sigmoid()
     ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-
     p_t = prob * targets + (1 - prob) * (1 - targets)
     loss = ce_loss * ((1 - p_t) ** gamma)
 
@@ -167,13 +164,8 @@ def sigmoid_focal_loss(
 
     if no_reduction:
         return loss
-    else:
-        total_token = inputs.shape[-1]
-        loss_mean = loss.mean() * total_token / caption_size
 
-        return loss_mean
-
-    # return loss.mean(1).sum() / num_boxes
+    return loss.mean(1).sum() / num_boxes
 
 
 class MLP(nn.Module):
@@ -209,12 +201,12 @@ def _get_activation_fn(activation, d_model=256, batch_dim=0):
     raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
 
 
-def gen_sineembed_for_position(pos_tensor, num_pos_feats=128):
+def gen_sineembed_for_position(pos_tensor):
     # n_query, bs, _ = pos_tensor.size()
     # sineembed_tensor = torch.zeros(n_query, bs, 256)
     scale = 2 * math.pi
-    dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=pos_tensor.device)
-    dim_t = 10000 ** (2 * (torch.div(dim_t, 2, rounding_mode='floor')) / num_pos_feats)
+    dim_t = torch.arange(128, dtype=torch.float32, device=pos_tensor.device)
+    dim_t = 10000 ** (2 * (torch.div(dim_t, 2, rounding_mode='floor')) / 128)
     x_embed = pos_tensor[:, :, 0] * scale
     y_embed = pos_tensor[:, :, 1] * scale
     pos_x = x_embed[:, :, None] / dim_t
@@ -247,11 +239,11 @@ class ContrastiveEmbed(nn.Module):
         super().__init__()
         self.max_text_len = max_text_len
 
-    def forward(self, x, text_dict):  # x: layer_hs (bs, 18259, 256) # hiddens state (fused feature)
+    def forward(self, x, text_dict):
         """_summary_
 
         Args:
-            x (_type_): _description_ 
+            x (_type_): _description_
             text_dict (_type_): _description_
             {
                 'encoded_text': encoded_text, # bs, 195, d_model
@@ -263,12 +255,11 @@ class ContrastiveEmbed(nn.Module):
         """
         assert isinstance(text_dict, dict)
 
-        y = text_dict["encoded_text"]  # (bs,40,256)
-        text_token_mask = text_dict["text_token_mask"]  # (bs,40)
+        y = text_dict["encoded_text"]
+        text_token_mask = text_dict["text_token_mask"]
 
-        res = x @ y.transpose(-1,
-                              -2)  # (bs,18259,256) @ (bs,256,40) -> (bs,18259,40) (,num_output_proposals, num_input_text_tokens)
-        res.masked_fill_(~text_token_mask[:, None, :], float("-inf"))  # fill index where mask=False with -inf
+        res = x @ y.transpose(-1, -2)
+        res.masked_fill_(~text_token_mask[:, None, :], float("-inf"))
 
         # padding to max_text_len
         new_res = torch.full((*res.shape[:-1], self.max_text_len), float("-inf"), device=res.device)
