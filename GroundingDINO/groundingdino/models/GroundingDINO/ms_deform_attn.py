@@ -27,8 +27,11 @@ from torch.nn.init import constant_, xavier_uniform_
 
 try:
     from groundingdino import _C
+
+    _C_AVAILABLE = True
 except:
     warnings.warn("Failed to load custom C++ ops. Using PyTorch implementation.")
+    _C_AVAILABLE = False
 
 
 # helpers
@@ -326,9 +329,8 @@ class MultiScaleDeformableAttention(nn.Module):
                 )
             )
 
-        # 直接使用pytorch实现
-        """
-        if torch.cuda.is_available() and value.is_cuda:
+        # prefer the compiled C++/CUDA kernel when available
+        if _C_AVAILABLE and torch.cuda.is_available() and value.is_cuda:
             halffloat = False
             if value.dtype == torch.float16:
                 halffloat = True
@@ -351,11 +353,6 @@ class MultiScaleDeformableAttention(nn.Module):
             output = multi_scale_deformable_attn_pytorch(
                 value, spatial_shapes, sampling_locations, attention_weights
             )
-        """
-
-        output = multi_scale_deformable_attn_pytorch(
-            value, spatial_shapes, sampling_locations, attention_weights
-        )
 
         output = self.output_proj(output)
 
