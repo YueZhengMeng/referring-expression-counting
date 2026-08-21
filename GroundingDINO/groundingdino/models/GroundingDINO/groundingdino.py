@@ -20,14 +20,14 @@ from typing import List
 
 import torch
 import torch.nn.functional as F
+from torch import nn
+
 from groundingdino.util import get_tokenlizer
 from groundingdino.util.misc import (
     NestedTensor,
     inverse_sigmoid,
     nested_tensor_from_tensor_list,
 )
-from torch import nn
-
 from .backbone import build_backbone
 from .bertwarper import (
     BertModelWarper,
@@ -75,11 +75,11 @@ class GroundingDINO(nn.Module):
                          Conditional DETR can detect in a single image. For COCO, we recommend 100 queries.
             aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
         """
+        self.anno = {}
         if anno_path:
             with open(anno_path, "r") as f:
                 anno = json.load(f)
                 # keep unique cap
-                self.anno = {}
                 for img, caps in anno.items():
                     for cap, items in caps.items():
                         if cap not in self.anno:
@@ -319,16 +319,16 @@ class GroundingDINO(nn.Module):
         # text_token_mask: True for nomask, False for mask
         # text_self_attention_masks: True for nomask, False for mask
         text_subject_mask = _role_mask(
-            self.tokenizer, captions, subjects, tokenized["input_ids"],
-            tokenized["offset_mapping"], text_token_mask, special_token_mask
+            captions, subjects, tokenized["offset_mapping"],
+            text_token_mask, special_token_mask
         )
         text_context_mask = _role_mask(
-            self.tokenizer, captions, contexts, tokenized["input_ids"],
-            tokenized["offset_mapping"], text_token_mask, special_token_mask
+            captions, contexts, tokenized["offset_mapping"],
+            text_token_mask, special_token_mask
         )
         text_attribute_mask = _role_mask(
-            self.tokenizer, captions, attributes, tokenized["input_ids"],
-            tokenized["offset_mapping"], text_token_mask, special_token_mask
+            captions, attributes, tokenized["offset_mapping"],
+            text_token_mask, special_token_mask
         )
 
         if encoded_text.shape[1] > self.max_text_len:
@@ -379,7 +379,7 @@ class GroundingDINO(nn.Module):
                 self.poss.append(pos_l)
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
-        hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
+        hs, reference, hs_enc, ref_enc, init_box_proposal, img_embs, txt_embs = self.transformer(
             srcs, masks, input_query_bbox, self.poss, input_query_label, attn_mask, text_dict
         )
 
@@ -437,6 +437,8 @@ class GroundingDINO(nn.Module):
 
 
 def split_caption(caption, anno=None):
+    if not anno:
+        return caption, "", ""
     if anno is not None:
         found = [(cap, items['type'], items['class'], items['attribute']) for cap, items in anno.items() if
                  cap.lower() + '.' == caption.lower()]
@@ -481,7 +483,7 @@ def build_groundingdino(args):
         text_encoder_type=args.text_encoder_type,
         sub_sentence_present=sub_sentence_present,
         max_text_len=args.max_text_len,
-        anno_path=args.anno_path,
+        anno_path=getattr(args, "anno_path", None),
     )
 
     return model

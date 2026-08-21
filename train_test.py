@@ -115,7 +115,7 @@ def train(epoch, *, box_threshold=BOX_THRESHOLD, token_threshold=TOKEN_THRESHOLD
 
         counter_for_image += 1
         results = threshold(
-            outputs, captions, model.tokenizer, TEXT_TRESHOLD,
+            outputs, captions, model.tokenizer, TEXT_TRESHOLD, model.max_text_len,
             box_threshold=box_threshold, token_threshold=token_threshold)
         for b in range(len(results)):  # (bs*num_cap)
             boxes, logits, phrases = results[b]
@@ -195,7 +195,7 @@ def eval(split, epoch=None, *, box_threshold=BOX_THRESHOLD, token_threshold=TOKE
         counter_for_image += 1
 
         results = threshold(
-            outputs, captions, model.tokenizer, TEXT_TRESHOLD,
+            outputs, captions, model.tokenizer, model.max_text_len, TEXT_TRESHOLD,
             box_threshold=box_threshold, token_threshold=token_threshold)
         for b in range(len(results)):
             boxes, logits, phrases = results[b]

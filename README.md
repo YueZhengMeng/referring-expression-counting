@@ -14,15 +14,15 @@ REC-8K images are selected from below datasets and partially collected from the 
 attributes. Due to the restriction of the original dataset license, we provide the original download links for the
 datasets.
 
-| Data Source            | Link                                                                                                                      | Remark                                    |
-|------------------------|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------|
+| Data Source            | Link                                                                                                                      | Remark                                    | 
+|------------------------|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------| 
 | Crowd Surveillance [1] | [download](https://drive.google.com/file/d/1QOv1jdOkfVYj6kw1lVZjQJo13V_23kGK/view?usp=sharing)                            |                                           |
 | mall [2]               | [download](https://personal.ie.cuhk.edu.hk/~ccloy/downloads_mall_dataset.html)                                            |                                           |
 | DETRAC [3]             | [download](https://wayback.archive-it.org/org-652/20231112212640/https://detrac-db.rit.albany.edu/download)               |                                           |
 | FSC147 [4]             | [download](https://github.com/cvlab-stonybrook/LearningToCountEverything/tree/master?tab=readme-ov-file#dataset-download) |                                           |
 | CARPK [5]              | [download](https://lafi.github.io/LPN/)                                                                                   |                                           |
 | NWPU [6]               | [download](https://gjy3035.github.io/NWPU-Crowd-Sample-Code/)                                                             | unzip part1-5 into one NWPU/images folder |
-| internet               | [download](https://drive.google.com/file/d/1eQ0T6B5Qev81FEU3lMUzUeegNkiWTQHq/view?usp=sharing)                            
+| internet               | [download](https://drive.google.com/file/d/1eQ0T6B5Qev81FEU3lMUzUeegNkiWTQHq/view?usp=sharing)                            |                                           |
 | VisDrone [7]           | [download](https://github.com/VisDrone/VisDrone-Dataset?tab=readme-ov-file)                                               | Task 5: Crowd Counting                    |
 | JHU-CROWD++ [8]        | [download](http://www.crowd-counting.com/#download)                                                                       |                                           |
 
@@ -53,23 +53,17 @@ wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alp
 
 ## Training and evaluation
 
-`train_test.py` intentionally remains a notebook-style script for local data-flow and fine-tuning experiments. Edit its
-constants near the top before running it:
-`MODEL_MODE` can be `tiny` (the default laptop/debug configuration),
-`compact_rec`, or `full`. Tiny checkpoints must not be evaluated with the full architecture. The image directory,
-annotation paths, BERT path, device and checkpoint paths are also explicit constants; no project code requires an
-`F:` drive.
+To train and evaluate the model, run the following command.
 
-For standalone evaluation, use the architecture metadata saved by training:
-
-```sh
-python inference.py --checkpoint ./stats/model-tiny.pth \
-  --model-mode tiny --image-dir /path/to/rec-8k \
-  --annotations anno/annotations.json --splits anno/splits.json
 ```
+<!-- build venv -->
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+<!-- train -->
+python train_test.py
 
-Use `--device cpu`, `--device cuda`, or `--device cuda:0` as appropriate. New checkpoints are loaded strictly and
-contain their model mode. Legacy checkpoints without metadata require an explicit `--model-mode`.
+```
 
 ## Acknowledgement
 

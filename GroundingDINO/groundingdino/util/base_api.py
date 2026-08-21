@@ -45,8 +45,14 @@ def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
     return image, image_transformed
 
 
-def _valid_caption_token_indices(tokenizer, caption):
-    encoded = tokenizer(caption, return_tensors="pt", return_special_tokens_mask=True)
+def _valid_caption_token_indices(tokenizer, caption, max_text_len=256):
+    encoded = tokenizer(
+        caption,
+        truncation=True,
+        max_length=max_text_len,
+        return_tensors="pt",
+        return_special_tokens_mask=True,
+    )
     ids = encoded["input_ids"][0]
     attention = encoded["attention_mask"][0].bool()
     special = encoded.get("special_tokens_mask", torch.zeros_like(attention.unsqueeze(0)))[0].bool()
@@ -64,7 +70,8 @@ def threshold(
         outputs,
         captions: str,
         tokenizer,
-        text_threshold: float=0.25,
+        max_text_len: int = 256,
+        text_threshold: float = 0.25,
         box_threshold: float = 0.25,
         token_threshold: float = 0.35):
     bs = outputs["pred_logits"].shape[0]
@@ -73,8 +80,13 @@ def threshold(
     for b in range(bs):
         prediction_logits = outputs["pred_logits"].detach().cpu().sigmoid()[b]
         prediction_boxes = outputs["pred_boxes"].detach().cpu()[b]
-        tokenized = tokenizer(captions[b], return_tensors="pt", return_special_tokens_mask=True)
-        cls_index, content_indices = _valid_caption_token_indices(tokenizer, captions[b])
+        tokenized = tokenizer(
+            captions[b],
+            truncation=True,
+            max_length=max_text_len,
+            return_special_tokens_mask=True
+        )
+        cls_index, content_indices = _valid_caption_token_indices(tokenizer, captions[b], max_text_len)
         mask1 = prediction_logits[:, cls_index].gt(box_threshold)
         if content_indices:
             local_scores = prediction_logits[:, content_indices]
@@ -85,6 +97,13 @@ def threshold(
 
         logits = prediction_logits[mask]
         boxes = prediction_boxes[mask]
+
+        # 防止没有预测框时 logits.max() 报错
+        # 此时返回空列表
+        if logits.numel() == 0:
+            ret.append((boxes, prediction_logits.new_empty((0,)), []))
+            continue
+
         phrases = [
             get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace('.', '')
             for logit in logits

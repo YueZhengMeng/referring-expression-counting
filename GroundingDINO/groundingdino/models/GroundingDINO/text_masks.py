@@ -14,7 +14,7 @@ def _content_token_ids(tokenizer, text):
             if int(token_id) not in special_ids and int(token_id) not in punctuation_ids}
 
 
-def _role_mask(tokenizer, captions, role_texts, input_ids, offsets, attention, special):
+def _role_mask(captions, role_texts, offsets, attention, special):
     masks = torch.zeros_like(attention, dtype=torch.bool)
     for row, (caption, role_text) in enumerate(zip(captions, role_texts)):
         if not role_text:
@@ -28,10 +28,5 @@ def _role_mask(tokenizer, captions, role_texts, input_ids, offsets, attention, s
             for token_index, (token_start, token_end) in enumerate(row_offsets.tolist()):
                 if token_end > token_start and token_start < end and token_end > start:
                     masks[row, token_index] = True
-        if not masks[row].any():
-            role_ids = _content_token_ids(tokenizer, role_text)
-            if role_ids:
-                for token_index, token_id in enumerate(input_ids[row].tolist()):
-                    masks[row, token_index] = int(token_id) in role_ids
         masks[row] &= attention[row] & ~special[row]
     return masks

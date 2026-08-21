@@ -139,7 +139,7 @@ def eval(model, loader, annotations,
             max_text_len=model.max_text_len,
         )
 
-        results = threshold(outputs, captions, model.tokenizer, text_threshold=text_threshold,
+        results = threshold(outputs, captions, model.tokenizer, model.max_text_len, text_threshold=text_threshold,
                             box_threshold=box_threshold, token_threshold=token_threshold)
         for b in range(len(results)):
             boxes, logits, phrases = results[b]

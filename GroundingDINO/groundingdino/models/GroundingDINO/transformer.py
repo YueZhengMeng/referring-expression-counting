@@ -333,6 +333,19 @@ class Transformer(nn.Module):
                 output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
             ).sigmoid()  # sigmoid
 
+            """
+            # gather tgt
+            tgt_undetach = torch.gather(
+                output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)
+            )
+            if self.embed_init_tgt:
+                tgt_ = (
+                    self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
+                )
+            else:
+                tgt_ = tgt_undetach.detach()
+            """
+
             # gather tgt
             tgt_undetach = torch.gather(
                 output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)

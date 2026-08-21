@@ -1,5 +1,3 @@
-import math
-
 import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
@@ -62,8 +60,9 @@ def prepare_targets(anno_b, captions, shapes, tokenizer, emb_size, image_group_i
     return targets
 
 
+"""
 def distance_threshold_func(boxes):
-    """Paper threshold; strict even median averages the two middle half-diagonals."""
+    # strict even median averages the two middle half-diagonals
     if not boxes:
         return 0.0
     ordered = sorted(boxes, key=lambda box: float(box[2]) * float(box[3]))
@@ -71,6 +70,23 @@ def distance_threshold_func(boxes):
     candidates = ordered[middle:middle + 1] if len(ordered) % 2 else ordered[middle - 1:middle + 1]
     return float(sum(math.hypot(float(box[2]), float(box[3])) / 2.0
                      for box in candidates) / len(candidates))
+"""
+
+
+def distance_threshold_func(boxes):
+    # 空预测时返回 0.0
+    if not boxes:
+        return 0.0
+    # 按 width * height 排序
+    # 使用 len(boxes) // 2 获取中间框的索引
+    # 偶数个框时选择排序后中点右侧的框，而不是平均中点两侧的框
+    areas = [float(box[2]) * float(box[3]) for box in boxes]
+    median_index = int(np.argsort(areas)[len(areas) // 2])
+    median_box = boxes[median_index]
+    # 使用该单个框的宽高计算半对角线
+    width = float(median_box[2])
+    height = float(median_box[3])
+    return float(np.sqrt(width ** 2 + height ** 2) / 2.0)
 
 
 def calc_loc_metric(pred_boxes, gt_points):
