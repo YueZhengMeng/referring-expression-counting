@@ -270,7 +270,7 @@ model = load_model("groundingdino/config/GroundingDINO_SwinT_OGC.py", "weights/g
 IMAGE_PATH = "weights/dog-3.jpeg"
 TEXT_PROMPT = "chair . person . dog ."
 BOX_TRESHOLD = 0.35
-TEXT_TRESHOLD = 0.25
+TEXT_THRESHOLD = 0.25
 
 image_source, image = load_image(IMAGE_PATH)
 
@@ -279,7 +279,7 @@ boxes, logits, phrases = predict(
     image=image,
     caption=TEXT_PROMPT,
     box_threshold=BOX_TRESHOLD,
-    text_threshold=TEXT_TRESHOLD
+    text_threshold=TEXT_THRESHOLD
 )
 
 annotated_frame = annotate(image_source=image_source, boxes=boxes, logits=logits, phrases=phrases)

@@ -79,6 +79,7 @@ def gen_encoder_output_proposals(
         grid_y, grid_x = torch.meshgrid(
             torch.linspace(0, H_ - 1, H_, dtype=torch.float32, device=memory.device),
             torch.linspace(0, W_ - 1, W_, dtype=torch.float32, device=memory.device),
+            indexing="ij"
         )
         grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)  # H_, W_, 2
 
@@ -243,28 +244,31 @@ class ContrastiveEmbed(nn.Module):
         self.max_text_len = max_text_len
 
     def forward(self, x, text_dict):
-        """_summary_
-
+        """
         Args:
-            x (_type_): _description_
-            text_dict (_type_): _description_
-            {
-                'encoded_text': encoded_text, # bs, 195, d_model
-                'text_token_mask': text_token_mask, # bs, 195
-                        # True for used tokens. False for padding tokens
-            }
+            x: 视觉特征张量，形状通常为 (bs, num_visual_tokens, d_model)
+            text_dict: 包含文本特征的字典，格式为：
+                {
+                    'encoded_text': 形状 (bs, seq_len, d_model) 的文本特征，
+                    'text_token_mask': 形状 (bs, seq_len) 的布尔掩码，
+                                      True 表示有效 token，False 表示 padding token
+                }
         Returns:
-            _type_: _description_
+            形状为 (bs, num_visual_tokens, max_text_len) 的相似度矩阵，
+            其中无效位置填充 -inf
         """
         assert isinstance(text_dict, dict)
 
         y = text_dict["encoded_text"]
         text_token_mask = text_dict["text_token_mask"]
 
+        # 点乘获取相似度矩阵 (bs, num_visual_tokens, seq_len)
         res = x @ y.transpose(-1, -2)
+        # 无效 token 位置填充 -inf
         res.masked_fill_(~text_token_mask[:, None, :], float("-inf"))
 
         # padding to max_text_len
+        # 填充到指定的最大长度
         new_res = torch.full((*res.shape[:-1], self.max_text_len), float("-inf"), device=res.device)
         new_res[..., : res.shape[-1]] = res
 

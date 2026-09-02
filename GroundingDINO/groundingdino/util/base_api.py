@@ -45,56 +45,87 @@ def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
     return image, image_transformed
 
 
-def _valid_caption_token_indices(tokenizer, caption, max_text_len=256):
-    encoded = tokenizer(
-        caption,
-        truncation=True,
-        max_length=max_text_len,
-        return_tensors="pt",
-        return_special_tokens_mask=True,
-    )
-    ids = encoded["input_ids"][0]
-    attention = encoded["attention_mask"][0].bool()
-    special = encoded.get("special_tokens_mask", torch.zeros_like(attention.unsqueeze(0)))[0].bool()
-    punctuation = tokenizer(".", add_special_tokens=False)["input_ids"]
-    punctuation = set(punctuation[0] if punctuation and isinstance(punctuation[0], list) else punctuation)
+def _valid_caption_token_indices(tokenizer, encoded, punctuation_ids):
+    """Return CLS and content-token positions from one encoded caption."""
+    ids = torch.as_tensor(encoded["input_ids"])
+    attention = torch.as_tensor(encoded["attention_mask"]).bool()
+    special = encoded.get("special_tokens_mask")
+    if special is None:
+        special = torch.zeros_like(attention)
+    else:
+        special = torch.as_tensor(special).bool()
+
+    # Accept either a single encoded row or a one-item batch.
+    if ids.ndim > 1:
+        ids = ids[0]
+    if attention.ndim > 1:
+        attention = attention[0]
+    if special.ndim > 1:
+        special = special[0]
+
+    punctuation_ids = {int(token_id) for token_id in punctuation_ids}
+    # 既不是 padding，又不是特殊 token 或句号的位置
     content = [int(i) for i in torch.where(attention & ~special)[0]
-               if int(ids[i]) not in punctuation]
+               if int(ids[i]) not in punctuation_ids]
     cls = 0
-    if getattr(tokenizer, "cls_token_id", None) in ids.tolist():
-        cls = ids.tolist().index(tokenizer.cls_token_id)
+    # CLS 第一次出现的位置
+    cls_token_id = getattr(tokenizer, "cls_token_id", None)
+    if cls_token_id is not None and cls_token_id in ids.tolist():
+        cls = ids.tolist().index(cls_token_id)
     return cls, content
 
 
 def threshold(
         outputs,
-        captions: str,
+        captions: list[str],
         tokenizer,
         max_text_len: int = 256,
         text_threshold: float = 0.25,
         box_threshold: float = 0.25,
         token_threshold: float = 0.35):
+
     bs = outputs["pred_logits"].shape[0]
+    # Tokenize all captions once; the same encoded rows are reused below.
+    tokenized_batch = tokenizer(
+        captions,
+        padding="longest",
+        truncation=True,
+        max_length=max_text_len,
+        return_tensors="pt",
+        return_special_tokens_mask=True,
+    )
+    # 获取句号的token id
+    punctuation = tokenizer(".", add_special_tokens=False)["input_ids"]
+    punctuation_ids = punctuation[0] if punctuation and isinstance(punctuation[0], list) else punctuation
 
     ret = []
     for b in range(bs):
         prediction_logits = outputs["pred_logits"].detach().cpu().sigmoid()[b]
         prediction_boxes = outputs["pred_boxes"].detach().cpu()[b]
-        tokenized = tokenizer(
-            captions[b],
-            truncation=True,
-            max_length=max_text_len,
-            return_special_tokens_mask=True
+        # Keep a list-like tokenization for get_phrases_from_posmap decoding.
+        tokenized = {
+            key: value[b].tolist() if torch.is_tensor(value) else value[b]
+            for key, value in tokenized_batch.items()
+        }
+        encoded = {
+            key: value[b:b + 1] if torch.is_tensor(value) else value[b:b + 1]
+            for key, value in tokenized_batch.items()
+        }
+        # 获取 cls token 的索引和其他有效 token 的索引
+        cls_index, content_indices = _valid_caption_token_indices(
+            tokenizer, encoded, punctuation_ids
         )
-        cls_index, content_indices = _valid_caption_token_indices(tokenizer, captions[b], max_text_len)
+        # cls token 得分大于box_threshold阈值
         mask1 = prediction_logits[:, cls_index].gt(box_threshold)
+        # 且其他有效 token 得分大于token_threshold阈值
         if content_indices:
             local_scores = prediction_logits[:, content_indices]
             mask2 = local_scores.gt(token_threshold).all(dim=1)
         else:
             mask2 = torch.ones(prediction_logits.shape[0], dtype=torch.bool)
-        mask = mask1 & mask2
 
+        # 两个mask都为True的预测框才保留
+        mask = mask1 & mask2
         logits = prediction_logits[mask]
         boxes = prediction_boxes[mask]
 
@@ -104,9 +135,11 @@ def threshold(
             ret.append((boxes, prediction_logits.new_empty((0,)), []))
             continue
 
+        # 获取预测框对应的文本，并去掉句号
         phrases = [
             get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace('.', '')
             for logit in logits
         ]
+        # 预测框、置信度、短语
         ret.append((boxes, logits.max(dim=1)[0], phrases))
     return ret

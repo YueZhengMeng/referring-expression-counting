@@ -13,14 +13,12 @@ from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAtte
 class BertModelWarper(nn.Module):
     def __init__(self, bert_model):
         super().__init__()
-        # self.bert = bert_modelc
-
         self.config = bert_model.config
         self.embeddings = bert_model.embeddings
         self.encoder = bert_model.encoder
         self.pooler = bert_model.pooler
-
-        self.get_extended_attention_mask = bert_model.get_extended_attention_mask
+        # 用于兼容新版本 Transformers 库
+        # self.get_extended_attention_mask = bert_model.get_extended_attention_mask
         self.invert_attention_mask = bert_model.invert_attention_mask
         # 用于兼容新版本 Transformers 库
         if hasattr(bert_model, 'get_head_mask'):
@@ -44,6 +42,23 @@ class BertModelWarper(nn.Module):
         else:
             head_mask = [None] * num_hidden_layers
         return head_mask
+
+    @staticmethod
+    def get_extended_attention_mask(attention_mask, input_shape, dtype):
+        # 用于兼容新版本 Transformers 库
+        if attention_mask.dim() == 3:
+            extended_attention_mask = attention_mask[:, None, :, :]
+        elif attention_mask.dim() == 2:
+            extended_attention_mask = attention_mask[:, None, None, :]
+        else:
+            raise ValueError(
+                f"Wrong shape for input_ids (shape {input_shape}) or attention_mask (shape {attention_mask.shape})"
+            )
+        # Convert attention mask to the same dtype as the model parameters.
+        extended_attention_mask = extended_attention_mask.to(dtype=dtype)
+        # Convert 1 -> 0 and 0 -> -inf.
+        extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(dtype).min
+        return extended_attention_mask
 
     def forward(
             self,
@@ -89,7 +104,8 @@ class BertModelWarper(nn.Module):
             if output_hidden_states is not None
             else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else getattr(self.config, "return_dict", self.config.use_return_dict)
+        return_dict = return_dict if return_dict is not None else getattr(self.config, "return_dict",
+                                                                          self.config.return_dict)
 
         if self.config.is_decoder:
             use_cache = use_cache if use_cache is not None else self.config.use_cache
@@ -121,12 +137,6 @@ class BertModelWarper(nn.Module):
         if token_type_ids is None:
             token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
 
-        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
-        # ourselves in which case we just need to make it broadcastable to all heads.
-        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
-            attention_mask, input_shape
-        )
-
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
         if self.config.is_decoder and encoder_hidden_states is not None:
@@ -153,6 +163,12 @@ class BertModelWarper(nn.Module):
             token_type_ids=token_type_ids,
             inputs_embeds=inputs_embeds,
             past_key_values_length=past_key_values_length,
+        )
+
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
+            attention_mask, input_shape, embedding_output.dtype
         )
 
         encoder_outputs = self.encoder(
@@ -194,69 +210,38 @@ class TextEncoderShell(nn.Module):
         return self.text_encoder(**kw)
 
 
-def generate_masks_with_special_tokens(tokenized, special_tokens_list, tokenizer):
-    """Generate attention mask between each pair of special tokens
+def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_tokens_list):
+    """Generate attention mask between each pair of special tokens.
+
     Args:
-        input_ids (torch.Tensor): input ids. Shape: [bs, num_token]
-        special_tokens_mask (list): special tokens mask.
+        tokenized:
+            Tokenizer 输出，至少包含 input_ids 和 attention_mask
+        special_tokens_list:
+            用于划分子句的特殊 token ID，例如 [CLS]、[SEP]、.、?
+
     Returns:
-        torch.Tensor: attention mask between each special tokens.
+        attention_mask:
+            [bs, num_token, num_token]，True 表示允许 self-attention
+        position_ids:
+            [bs, num_token]，每个子句内部的位置编号
+        cate_to_token_mask_list:
+            长度为 bs 的 list；
+            第 b 个元素形状为 [num_clauses_b, num_token]
     """
     input_ids = tokenized["input_ids"]
     bs, num_token = input_ids.shape
     # special_tokens_mask: bs, num_token. 1 for special tokens. 0 for normal tokens
+    # True 表示该位置属于用于划分子句的特殊 token
     special_tokens_mask = torch.zeros((bs, num_token), device=input_ids.device).bool()
     for special_token in special_tokens_list:
         special_tokens_mask |= input_ids == special_token
 
     # idxs: each row is a list of indices of special tokens
+    # idxs 的每一行是 [row, col]
     idxs = torch.nonzero(special_tokens_mask)
 
     # generate attention mask and positional ids
-    attention_mask = (
-        torch.eye(num_token, device=input_ids.device).bool().unsqueeze(0).repeat(bs, 1, 1)
-    )
-    position_ids = torch.zeros((bs, num_token), device=input_ids.device)
-    previous_col = 0
-    for i in range(idxs.shape[0]):
-        row, col = idxs[i]
-        if (col == 0) or (col == num_token - 1):
-            attention_mask[row, col, col] = True
-            position_ids[row, col] = 0
-        else:
-            attention_mask[row, previous_col + 1: col + 1, previous_col + 1: col + 1] = True
-            position_ids[row, previous_col + 1: col + 1] = torch.arange(
-                0, col - previous_col, device=input_ids.device
-            )
-
-        previous_col = col
-
-    # # padding mask
-    # padding_mask = tokenized['attention_mask']
-    # attention_mask = attention_mask & padding_mask.unsqueeze(1).bool() & padding_mask.unsqueeze(2).bool()
-
-    return attention_mask, position_ids.to(torch.long)
-
-
-def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_tokens_list, tokenizer):
-    """Generate attention mask between each pair of special tokens
-    Args:
-        input_ids (torch.Tensor): input ids. Shape: [bs, num_token]
-        special_tokens_mask (list): special tokens mask.
-    Returns:
-        torch.Tensor: attention mask between each special tokens.
-    """
-    input_ids = tokenized["input_ids"]
-    bs, num_token = input_ids.shape
-    # special_tokens_mask: bs, num_token. 1 for special tokens. 0 for normal tokens
-    special_tokens_mask = torch.zeros((bs, num_token), device=input_ids.device).bool()
-    for special_token in special_tokens_list:
-        special_tokens_mask |= input_ids == special_token
-
-    # idxs: each row is a list of indices of special tokens
-    idxs = torch.nonzero(special_tokens_mask)
-
-    # generate attention mask and positional ids
+    # 默认每个 token 只能关注自己
     attention_mask = (
         torch.eye(num_token, device=input_ids.device).bool().unsqueeze(0).repeat(bs, 1, 1)
     )
@@ -265,17 +250,28 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
     previous_col = 0
     for i in range(idxs.shape[0]):
         row, col = idxs[i]
-        if (col == 0) or (col == num_token - 1):
+        # 关键修复：
+        # 当前样本的有效序列长度由 attention_mask 决定，
+        # 不能使用整个 batch 的 num_token。
+        last_valid_col = tokenized["attention_mask"][row].sum() - 1
+        # [CLS] 或当前样本最后一个有效特殊 token（通常是 [SEP]）
+        # 不再生成新的 clause mask。
+        if (col == 0) or (col == last_valid_col):
             attention_mask[row, col, col] = True
             position_ids[row, col] = 0
         else:
+            # 当前子句内部允许相互 self-attention
             attention_mask[row, previous_col + 1: col + 1, previous_col + 1: col + 1] = True
+            # 当前子句的位置编号从 0 开始
             position_ids[row, previous_col + 1: col + 1] = torch.arange(
                 0, col - previous_col, device=input_ids.device
             )
-            c2t_maski = torch.zeros((num_token), device=input_ids.device).bool()
-            c2t_maski[previous_col + 1: col] = True
-            cate_to_token_mask_list[row].append(c2t_maski)
+            # 只标记句号/问号之前的普通文本 token，不包含当前的句号/问号。
+            # 同时避免任何特殊 token 相邻时生成空 mask
+            if col > previous_col + 1:
+                c2t_maski = torch.zeros((num_token), device=input_ids.device).bool()
+                c2t_maski[previous_col + 1: col] = True
+                cate_to_token_mask_list[row].append(c2t_maski)
         previous_col = col
 
     cate_to_token_mask_list = [

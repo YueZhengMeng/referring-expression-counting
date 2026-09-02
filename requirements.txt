@@ -2,7 +2,7 @@ addict
 diffusers
 matplotlib
 numpy
-opencv_python
+opencv-python
 Pillow
 pycocotools
 PyYAML
@@ -10,8 +10,10 @@ requests
 scikit-learn
 scipy
 setuptools
-supervision
+supervision>=0.22.0
 torch
 torchvision
 transformers
 yapf
+timm
+tqdm

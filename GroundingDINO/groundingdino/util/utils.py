@@ -601,10 +601,15 @@ def get_phrases_from_posmap(
 ):
     assert isinstance(posmap, torch.Tensor), "posmap must be torch.Tensor"
     if posmap.dim() == 1:
+        # 清除位置 0 到 left_idx 的 token；
         posmap[0: left_idx + 1] = False
+        # 清除位置 right_idx 及之后的 token
         posmap[right_idx:] = False
+        # 找到布尔 mask 中为真的 token 位置
         non_zero_idx = posmap.nonzero(as_tuple=True)[0].tolist()
+        # 从 tokenized["input_ids"] 取出对应 token ID
         token_ids = [tokenized["input_ids"][i] for i in non_zero_idx]
+        # 使用 tokenizer 解码成字符串
         return tokenizer.decode(token_ids)
     else:
         raise NotImplementedError("posmap must be 1-dim")

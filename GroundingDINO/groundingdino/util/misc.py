@@ -470,15 +470,13 @@ class NestedTensor(object):
         return {"tensors.shape": self.tensors.shape, "mask.shape": self.mask.shape}
 
 
-def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
-    # TODO make this more general
+def nested_tensor_from_tensor_list(tensor_list: List[Tensor]) -> NestedTensor:
+    # 已实现对不同尺寸的图片的统一padding，并同时生成mask
     if tensor_list[0].ndim == 3:
         if torchvision._is_tracing():
             # nested_tensor_from_tensor_list() does not export well to ONNX
             # call _onnx_nested_tensor_from_tensor_list() instead
             return _onnx_nested_tensor_from_tensor_list(tensor_list)
-
-        # TODO make it support different-sized images
         max_size = _max_by_axis([list(img.shape) for img in tensor_list])
         # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
         batch_shape = [len(tensor_list)] + max_size
@@ -502,8 +500,8 @@ def _onnx_nested_tensor_from_tensor_list(tensor_list: List[Tensor]) -> NestedTen
     max_size = []
     for i in range(tensor_list[0].dim()):
         max_size_i = torch.max(
-            torch.stack([img.shape[i] for img in tensor_list]).to(torch.float32)
-        ).to(torch.int64)
+            torch.stack([torch.as_tensor(img.shape[i], dtype=torch.int64) for img in tensor_list])
+        )
         max_size.append(max_size_i)
     max_size = tuple(max_size)
 
@@ -518,9 +516,9 @@ def _onnx_nested_tensor_from_tensor_list(tensor_list: List[Tensor]) -> NestedTen
         padded_img = torch.nn.functional.pad(img, (0, padding[2], 0, padding[1], 0, padding[0]))
         padded_imgs.append(padded_img)
 
-        m = torch.zeros_like(img[0], dtype=torch.int, device=img.device)
-        padded_mask = torch.nn.functional.pad(m, (0, padding[2], 0, padding[1]), "constant", 1)
-        padded_masks.append(padded_mask.to(torch.bool))
+        m = torch.zeros_like(img[0], dtype=torch.bool, device=img.device)
+        padded_mask = torch.nn.functional.pad(m, (0, padding[2], 0, padding[1]), "constant", True)
+        padded_masks.append(padded_mask)
 
     tensor = torch.stack(padded_imgs)
     mask = torch.stack(padded_masks)
