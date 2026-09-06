@@ -1,4 +1,5 @@
 import argparse
+import csv
 import os
 import sys
 
@@ -269,10 +270,10 @@ def eval(model, loader, annotations, criterion, split, device, text_threshold,
 
 
 def _write_stats_line(stats_file, values):
-    formatted = [value if isinstance(value, str) else str(round(value, 4))
+    formatted = [value if isinstance(value, str) else round(value, 4)
                  for value in values]
-    with open(stats_file, 'a') as file:
-        file.write('%s\n' % ' | '.join(formatted))
+    with open(stats_file, 'a', newline='') as file:
+        csv.writer(file).writerow(formatted)
 
 
 if __name__ == '__main__':
@@ -290,16 +291,16 @@ if __name__ == '__main__':
         help='Path to the GroundingDINO configuration file',
     )
     parser.add_argument(
-        '--pretrained-checkpoint', default='F:/GroundingDINO/groundingdino_swint_ogc.pth',
+        '--pretrained-checkpoint', default='/home/pwb/pwb/checkpoints/GroundingDINO/groundingdino_swint_ogc.pth',
         help='Pretrained checkpoint used by the full model',
     )
-    parser.add_argument('--image-dir', default='F:/REC-8K/rec-8k')
+    parser.add_argument('--image-dir', default='/home/pwb/pwb/rec-8k')
     parser.add_argument('--annotations', default='anno/annotations.json')
     parser.add_argument('--splits', default='anno/splits.json')
-    parser.add_argument('--epochs', type=int, default=2)
+    parser.add_argument('--epochs', type=int, default=30)
     parser.add_argument('--early_stop_patience', type=int, default=5)
     parser.add_argument(
-        '--batch_size', '--batch-size', dest='batch_size', type=int, default=3,
+        '--batch_size', '--batch-size', dest='batch_size', type=int, default=1,
         help='Batch size for data loaders',
     )
     parser.add_argument('--learning-rate', type=float, default=1e-5)
@@ -332,7 +333,7 @@ if __name__ == '__main__':
     processor = DataProcessor(args.image_dir, args.annotations, args.splits)
     annotations = processor.annotations
     loaders = {
-        get_loader(processor, split, args.batch_size)
+        split: get_loader(processor, split, args.batch_size)
         for split in ('train', 'val', 'test')
     }
     print('Data loaded!')
@@ -368,7 +369,7 @@ if __name__ == '__main__':
                               anneal_strategy='linear', pct_start=0.1, div_factor=25.0, final_div_factor=10000.0)
 
     os.makedirs(args.stats_dir, exist_ok=True)
-    stats_file = os.path.join(args.stats_dir, 'stats.txt')
+    stats_file = os.path.join(args.stats_dir, 'stats.csv')
     print(f'Saving stats to {stats_file}')
     header = [
         'train_mae', 'train_rmse', 'train_TP', 'train_FP', 'train_FN',
@@ -378,10 +379,10 @@ if __name__ == '__main__':
         'test_mae', 'test_rmse', 'test_TP', 'test_FP', 'test_FN',
         'test_precision', 'test_recall', 'test_f1',
     ]
-    with open(stats_file, 'w+') as file:
-        file.write('%s\n' % ' | '.join(header))
+    with open(stats_file, 'w', newline='') as file:
+        csv.writer(file).writerow(header)
 
-    best_f1 = float('-inf')
+    best_mae = float('inf')
     best_state = None
     early_stop_count = 0
     model_name = os.path.join(args.stats_dir, f'best_model.pth')
@@ -394,11 +395,21 @@ if __name__ == '__main__':
             model, loaders['val'], annotations, criterion, 'val', device,
             args.text_threshold, args.box_threshold, args.token_threshold, epoch,
         )
-        val_f1 = val_metrics[-1]
+        test_metrics = eval(
+            model, loaders['test'], annotations, criterion, 'test', device,
+            args.text_threshold, args.box_threshold, args.token_threshold, epoch,
+        )
+        val_mae = val_metrics[0]
 
-        if best_f1 < val_f1:
-            best_f1 = val_f1
-            print(f'New best F1: {best_f1}')
+        _write_stats_line(
+            stats_file,
+            list(train_metrics) + ['||'] + list(val_metrics) +
+            ['||'] + list(test_metrics),
+        )
+
+        if best_mae > val_mae:
+            best_mae = val_mae
+            print(f'New best MAE: {best_mae}')
             best_state = cpu_state_dict(model)
             torch.save({'model': best_state, }, model_name)
             early_stop_count = 0
@@ -408,10 +419,9 @@ if __name__ == '__main__':
                 print(f'Early stopping at epoch {epoch}')
                 break
 
-        _write_stats_line(
-            stats_file,
-            list(train_metrics) + ['||'] + list(val_metrics) +
-            ['||'] + [0] * 8,
+    if best_state is None or not os.path.isfile(model_name):
+        raise RuntimeError(
+            'No valid validation checkpoint was produced; cannot run final test.'
         )
 
     print(f'Inference on test set using best model: {model_name}')

@@ -6,6 +6,7 @@ import sys
 import textwrap
 
 import matplotlib
+from tqdm import tqdm
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -107,7 +108,7 @@ def visualize_prediction(image_path, gt_points_pixel, pred_points_norm, caption,
     plt.close(fig)
 
 
-def eval(model, loader, annotations, split, device, text_threshold,
+def eval(model, loader, annotations, criterion, split, device, text_threshold,
          box_threshold, token_threshold, image_dir, output_dir):
     print(f"Inference on {split} set")
     # 设置整个模型为eval模式
@@ -263,7 +264,7 @@ if __name__ == '__main__':
         default='GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py',
         help='Path to the GroundingDINO configuration file',
     )
-    parser.add_argument('--image-dir', default='F:/REC-8K/rec-8k')
+    parser.add_argument('--image-dir', default='/home/pwb/pwb/rec-8k')
     parser.add_argument('--annotations', default='anno/annotations.json')
     parser.add_argument('--splits', default='anno/splits.json')
     parser.add_argument(
@@ -285,6 +286,8 @@ if __name__ == '__main__':
     parser.add_argument('--stats_dir', default='./stats')
     parser.add_argument('--split', type=str,
                         default='test', choices=['train', 'val', 'test'], help='Split to evaluate on')
+    parser.add_argument('--output_dir', type=str,
+                        default='./cast_study')
     args = parser.parse_args()
 
     # 设置随机种子
@@ -307,7 +310,7 @@ if __name__ == '__main__':
 
     """ model """
     print(f"Loading model from checkpoint: {args.stats_dir}")
-    model = load_model(args.config, args.stats_dir, device=device)
+    model = load_model(args.config, os.path.join(args.stats_dir, f'best_model.pth'), device=device)
     model = model.to(device)
 
     # 冻结backbone和bert

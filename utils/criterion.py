@@ -85,41 +85,36 @@ class SetCriterion(nn.Module):
 
     def loss_label(self, outputs, targets, indices, **kwargs):
         logits = outputs["pred_logits"]
-        matched_logits = []
-        matched_labels = []
+        # 未匹配的query保持全0，作为背景/no-object目标
+        target_labels = torch.zeros_like(logits)
         valid_masks = []
         for batch_index, (src, tgt) in enumerate(indices):
-            # 取出已匹配的query的有效 token mask、文本 label、logits
-            if not src.numel():
-                continue
             valid = targets[batch_index].get("valid_token_mask")
             if valid is None:
                 valid = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
             valid = valid.to(logits.device, dtype=torch.bool)
-            labels = targets[batch_index]["labels"].to(logits.device)
-            matched_logits.append(logits[batch_index, src])
-            matched_labels.append(labels[tgt])
-            valid_masks.append(valid.expand(src.numel(), -1))
-        if not matched_logits:
-            return {"loss_label": logits.sum() * 0}
-        # 拼接
-        matched_logits = torch.cat(matched_logits)
-        matched_labels = torch.cat(matched_labels)
-        valid_masks = torch.cat(valid_masks)
-        # 将无效token的logits和label置为0
-        # safe_logits：[Qv, hidden_dim]，每行代表一个选中的query的与每个有效token相似度
-        # safe_labels：[Qv, max_num_tokens]，每行中有效token的位置为1，其他位置为0
-        # hidden_dim = max_num_tokens = 256
-        safe_logits = torch.where(valid_masks, matched_logits, torch.zeros_like(matched_logits))
-        safe_labels = torch.where(valid_masks, matched_labels, torch.zeros_like(matched_labels))
-        # 逐token计算二分类交叉熵：使每个 被选中的query 与每个 有效token 的相似度尽可能靠近1
-        element = F.binary_cross_entropy_with_logits(safe_logits, safe_labels, reduction="none")
-        # 只保留有效 token 的损失，并对 token 维度求和
-        per_query = element.masked_fill(~valid_masks, 0).sum(-1)
-        # 按有效 token 数量归一化
-        per_query = per_query / valid_masks.sum(-1).clamp_min(1)
-        # 最后对所有匹配 query 求均值
-        return {"loss_label": per_query.mean()}
+            valid_masks.append(valid)
+            if src.numel():
+                labels = targets[batch_index]["labels"].to(logits.device)
+                target_labels[batch_index, src] = labels[tgt]
+
+        # 只在有效文本token上计算损失，避免padding位置的-inf参与计算
+        valid_masks = torch.stack(valid_masks).unsqueeze(1).expand_as(logits)
+        safe_logits = torch.where(valid_masks, logits, torch.zeros_like(logits))
+
+        # 对全部query计算focal loss，使未匹配query得到负样本监督
+        element = F.binary_cross_entropy_with_logits(
+            safe_logits, target_labels, reduction="none"
+        )
+        probability = safe_logits.sigmoid()
+        p_t = probability * target_labels + (1 - probability) * (1 - target_labels)
+        alpha_t = 0.25 * target_labels + 0.75 * (1 - target_labels)
+        element = alpha_t * ((1 - p_t) ** 2) * element
+        element = element.masked_fill(~valid_masks, 0)
+
+        # 每个caption按query数和有效token数归一化，再对batch求平均
+        per_sample = element.sum(dim=(1, 2)) / valid_masks.sum(dim=(1, 2)).clamp_min(1)
+        return {"loss_label": per_sample.mean()}
 
     def loss_point(self, outputs, targets, indices, **kwargs):
         pred = []
