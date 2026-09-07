@@ -380,6 +380,7 @@ class Transformer(nn.Module):
             topk = self.num_queries
             topk_proposals = torch.topk(topk_logits, topk, dim=1)[1]  # bs, num_queries
 
+            """
             # 按照索引大小进行排序
             # 由于图像 token 是按照 feature level 顺序拼接的，因此较大的索引通常更可能来自后面的大视野特征层
             # 前 10% 为 higher tokens, 后 90% 为 lower tokens
@@ -403,6 +404,7 @@ class Transformer(nn.Module):
             # 将更新后的 lower token 按原位置写回，higher token 不做修改
             output_memory = output_memory.scatter(1, lower_idxes.unsqueeze(-1).expand(-1, -1, self.d_model),
                                                   updated_lower_tokens)
+            """
 
             # gather boxes
             # 取出 Encoder 输出的 proposal
@@ -415,19 +417,6 @@ class Transformer(nn.Module):
             init_box_proposal = torch.gather(
                 output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
             ).sigmoid()  # sigmoid
-
-            """
-            # gather tgt
-            tgt_undetach = torch.gather(
-                output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)
-            )
-            if self.embed_init_tgt:
-                tgt_ = (
-                    self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
-                )
-            else:
-                tgt_ = tgt_undetach.detach()
-            """
 
             # gather tgt
             # 取出选中的 Encoder 输出的 image token，作为 content query，[bs, num_queries, c]
