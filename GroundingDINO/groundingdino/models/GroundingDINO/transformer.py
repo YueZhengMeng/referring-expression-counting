@@ -223,6 +223,9 @@ class Transformer(nn.Module):
         # 用于 lower image tokens 和 higher image tokens 的 cross attention
         self.cross_attention = CrossAttentionLayer(d_model)
 
+        # 用于 text init content query
+        self.text_init_projection = nn.Linear(d_model, d_model, bias=False)
+
         # 归一化 Encoder top-k proposal 特征
         self.tgt_fusion_norm = nn.LayerNorm(d_model)
         # 然后与 learned query 进行加权求和，权重为可学习参数
@@ -349,6 +352,9 @@ class Transformer(nn.Module):
         # - memory_text: [bs, seq_len, c]，特征增强后的 text token
         #########################################################
 
+        # 备份原始 text 特征
+        text_feat = text_dict["encoded_text"]
+
         # 保存更新后的 text 特征
         text_dict["encoded_text"] = memory_text
         txt_embs = text_dict["encoded_text"]
@@ -443,10 +449,32 @@ class Transformer(nn.Module):
                 refpoint_embed, tgt = refpoint_embed_, tgt_
 
         elif self.two_stage_type == "no":
-            # 使用可学习的 query 和 候选框
-            tgt_ = (
-                self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
-            )  # nq, bs, d_model
+            output_memory = memory
+            # 进一步映射和归一化 Encoder 输出的 image token
+            output_memory = self.enc_output_norm(self.enc_output(output_memory))
+
+            # =====================================================
+            # Text Init
+            # =====================================================
+
+            # Q
+            Q = self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
+            # [bs, nq, C]
+
+            # T = GELU(F_t M)
+            T = F.gelu(self.text_init_projection(text_feat))
+            # [bs, N, C]
+
+            # W = Q T^T
+            W = torch.matmul(Q, T.transpose(-1, -2))
+            # [bs, nq, N]
+
+            # Q_t = W F_t
+            Q_t = torch.matmul(W, text_feat)
+            # [bs, nq, C]
+
+            tgt_ = Q_t
+
             refpoint_embed_ = (
                 self.refpoint_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
             )  # nq, bs, 4
