@@ -216,22 +216,12 @@ class Transformer(nn.Module):
             # 此时为每个 query 创建一个可学习的四维 reference box 用于初始化
             self.init_ref_points(num_queries)  # init self.refpoint_embed
 
-            # 用于进一步映射和归一化 Encoder 输出的image token
-            self.enc_output = nn.Linear(d_model, d_model)
-            self.enc_output_norm = nn.LayerNorm(d_model)
-
         # 暂时设置为 None，稍后由 GroundingDINO.__init__() 赋值
         self.enc_out_class_embed = None
         self.enc_out_bbox_embed = None
 
         # 用于 lower image tokens 和 higher image tokens 的 cross attention
         self.cross_attention = CrossAttentionLayer(d_model)
-
-        # 用于 text init content query
-        self.text_init_projection = nn.Linear(d_model, d_model, bias=False)
-
-        # 用于 density init content query
-        self.density_cross_attn = CrossAttentionLayer(d_model)
 
         # 归一化 Encoder top-k proposal 特征
         self.tgt_fusion_norm = nn.LayerNorm(d_model)
@@ -359,9 +349,6 @@ class Transformer(nn.Module):
         # - memory_text: [bs, seq_len, c]，特征增强后的 text token
         #########################################################
 
-        # 备份原始 text 特征
-        text_feat = text_dict["encoded_text"]
-
         # 保存更新后的 text 特征
         text_dict["encoded_text"] = memory_text
         txt_embs = text_dict["encoded_text"]
@@ -437,13 +424,12 @@ class Transformer(nn.Module):
                 output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)
             )
             if self.embed_init_tgt:
-                # 取出可学习 query
+                # 取出可学习 content query
                 learned_tgt = (
                     self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
                 )
                 # 归一化，加权融合，权重为可学习参数
-                fused_tgt = self.tgt_fusion_norm(tgt_undetach)
-                tgt_ = learned_tgt + self.tgt_fusion_alpha * fused_tgt
+                tgt_ = learned_tgt + self.tgt_fusion_alpha * self.tgt_fusion_norm(tgt_undetach)
             else:
                 tgt_ = tgt_undetach
 
@@ -456,68 +442,10 @@ class Transformer(nn.Module):
                 refpoint_embed, tgt = refpoint_embed_, tgt_
 
         elif self.two_stage_type == "no":
-            output_memory = memory
-            # 进一步映射和归一化 Encoder 输出的 image token
-            output_memory = self.enc_output_norm(self.enc_output(output_memory))
-
-            # =====================================================
-            # Text Init
-            # =====================================================
-
-            # Q
-            Q = self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
-            # [bs, nq, C]
-
-            # T = GELU(F_t M)
-            T = F.gelu(self.text_init_projection(text_feat))
-            # [bs, N, C]
-
-            # W = Q T^T
-            W = torch.matmul(Q, T.transpose(-1, -2))
-            # [bs, nq, N]
-
-            # Q_t = W F_t
-            Q_t = torch.matmul(W, text_feat)
-            # [bs, nq, C]
-
-            # =====================================================
-            # Density Init
-            # =====================================================
-
-            # Encoder image features
-            image_feat = output_memory
-            # [bs, HW, C]
-
-            # Global text feature
-            text_token_mask_global = text_dict["text_token_mask"].float()
-            text_global = ((text_feat * text_token_mask_global.unsqueeze(-1)).sum(dim=1) /
-                           text_token_mask_global.sum(dim=1, keepdim=True).clamp(min=1))
-
-            # Normalize
-            image_feat_norm = F.normalize(image_feat, dim=-1)
-            text_global_norm = F.normalize(text_global, dim=-1)
-
-            # Image-text similarity
-            scores = torch.matmul(image_feat_norm, text_global_norm.unsqueeze(-1)).squeeze(-1)
-            # [bs, HW]
-
-            # Top-K
-            _, topk_indices = torch.topk(scores, k=self.num_queries, dim=-1)
-
-            # Gather Top-K image features
-            D_K = torch.gather(image_feat, dim=1,
-                               index=topk_indices.unsqueeze(-1).expand(-1, -1, image_feat.shape[-1]))
-            # [bs, K, C]
-
-            # =====================================================
-            # Cross Attention
-            # =====================================================
-
-            Q_hat = self.density_cross_attn(Q_t, D_K)
-            # [bs, nq, C]
-
-            tgt_ = Q_hat
-
+            # 使用可学习的 query 和 候选框
+            tgt_ = (
+                self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
+            )  # nq, bs, d_model
             refpoint_embed_ = (
                 self.refpoint_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
             )  # nq, bs, 4
