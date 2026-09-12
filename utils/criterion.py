@@ -5,11 +5,12 @@ from scipy.optimize import linear_sum_assignment
 
 
 class HungarianMatcher(nn.Module):
-    def __init__(self, cost_class=5.0, cost_point=1.0, **kwargs):
+    def __init__(self, cost_class=5.0, cost_point=1.0, cost_rep=0.2, **kwargs):
         super().__init__()
         self.cost_class = cost_class
         self.cost_point = cost_point
-        if cost_class == 0 and cost_point == 0:
+        self.cost_rep = cost_rep
+        if cost_class == 0 and cost_point == 0 and cost_rep == 0:
             raise ValueError("all matching costs cannot be zero")
 
     @torch.no_grad()  # 匈牙利匹配不可微，不需要计算梯度
@@ -26,6 +27,21 @@ class HungarianMatcher(nn.Module):
             if n_targets == 0:
                 indices.append((empty, empty.clone()))
                 continue
+
+            # 找到同一张图、同一 class 下的其他 target，作为 Y_neg
+            negative_points_list = [
+                other_target["points"].to(points.device)
+                for other_target in targets
+                if other_target is not target
+                   and other_target["image_group_id"] == target["image_group_id"]
+                   and other_target["class_name"] == target["class_name"]
+            ]
+
+            if negative_points_list:
+                negative_points = torch.cat(negative_points_list, dim=0)
+            else:
+                negative_points = target_points.new_empty((0, target_points.shape[-1]))
+
             # 取出有效token集合，默认全为True
             valid = target.get("valid_token_mask")
             if valid is None:
@@ -56,8 +72,32 @@ class HungarianMatcher(nn.Module):
 
             # 计算预测点与真实点之间的L1/曼哈顿距离
             point_cost = torch.cdist(points[batch_index], target_points, p=1)
-            # 总成本 = 类别成本 + 点成本
-            cost = self.cost_class * class_cost + self.cost_point * point_cost
+
+            # SSM repulsive cost
+            if self.cost_rep > 0 and negative_points.numel() > 0:
+                # [Q, N_neg] -> [Q]
+                nearest_negative_dist = torch.cdist(
+                    points[batch_index], negative_points, p=2
+                ).min(dim=1).values
+
+                # [Q, N]
+                positive_dist = torch.cdist(
+                    points[batch_index], target_points, p=2
+                )
+
+                # R(p_hat_i, p_j)
+                ambiguity_ratio = nearest_negative_dist[:, None] / positive_dist.clamp_min(1e-6)
+
+                # C_rep(p_hat_i, p_j) = exp(-R)
+                repulsive_cost = torch.exp(-ambiguity_ratio)
+            else:
+                repulsive_cost = points[batch_index].new_zeros(
+                    (points[batch_index].shape[0], n_targets)
+                )
+
+            # 总成本 = 类别成本 + 点成本 + SSM repulsive cost
+            cost = self.cost_class * class_cost + self.cost_point * point_cost + self.cost_rep * repulsive_cost
+
             # 匈牙利算法求解最优匹配，返回源点和目标点对应的索引
             src, tgt = linear_sum_assignment(cost.detach().cpu().numpy())
             indices.append((
