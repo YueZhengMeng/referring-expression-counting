@@ -68,11 +68,16 @@ class HungarianMatcher(nn.Module):
 
 
 class SetCriterion(nn.Module):
-    def __init__(self):
+    def __init__(self, ASD=False):
         super().__init__()
         self.matcher = HungarianMatcher(cost_class=5, cost_point=1)
         self.losses = ["labels", "points", "contrast"]
-        self.weight_dict = {"loss_label": 5, "loss_point": 1, "loss_contrast": 0.06}
+        self.weight_dict = {"loss_label": 5, "loss_point": 1}
+        self.ASD = ASD
+        if ASD:
+            self.weight_dict["loss_contrast_asd"] = 0.015
+        else:
+            self.weight_dict["loss_contrast"] = 0.06
 
     @staticmethod
     def _matched(outputs, targets, indices, key):
@@ -140,7 +145,8 @@ class SetCriterion(nn.Module):
     def loss_contrast(self, outputs, targets, indices, image_group_ids=None, **kwargs):
         img_embs = outputs["img_embs"]
         txt_embs = outputs["txt_embs"]
-        token_masks = outputs.get("attribute_token_mask", outputs.get("token_masks"))
+        # 取出属性 token 的 mask
+        token_masks = outputs["attribute_token_mask"]
         if token_masks is None:
             return {"loss_contrast": img_embs.sum() * 0}
         groups = image_group_ids
@@ -189,6 +195,177 @@ class SetCriterion(nn.Module):
         # 返回所有 caption 的平均损失
         return {"loss_contrast": torch.stack(terms).mean()}
 
+    def loss_contrast_asd(self, outputs, targets, indices, image_group_ids=None, **kwargs):
+        """
+        Attribute Semantic Discrimination (ASD) loss:
+            L_attr = (L_i2t_cons + L_t2i_cons) / 2
+
+        img_embs:    [B, Nq, D]    - all decoder queries
+        txt_embs:    [B, W, D]     - text token embeddings
+        pred_points: [B, Nq, 2]    - predicted normalized coordinates
+        targets[i]["points"]: [N, 2] - normalized GT coordinates
+        indices[i][0]: matched query indices from Hungarian matching
+        """
+
+        img_embs = outputs["img_embs"]
+        txt_embs = outputs["txt_embs"]
+        pred_points = outputs["pred_points"]
+        # 取出所有有效 token 的 mask
+        text_token_masks = outputs["text_token_mask"]
+
+        if text_token_masks is None:
+            return {"loss_contrast": img_embs.sum() * 0}
+
+        # Hyperparameters from the paper / default setting.
+        sigma = 0.35  # semantic threshold
+        gamma = 16.0  # distance threshold in pixels
+        tau = 0.07  # temperature; paper does not report it
+
+        if image_group_ids is None:
+            groups = [target.get("image_group_id", i) for i, target in enumerate(targets)]
+        else:
+            groups = image_group_ids
+
+        class_names = [target.get("class_name", "") for target in targets]
+        attr_names = [target.get("attribute_name", "") for target in targets]
+
+        # ------------------------------------------------------------
+        # Text representations:
+        # Tf       : all valid token embeddings, [W, D]
+        # Tf_bar   : average pooled text embedding, [D]
+        # ------------------------------------------------------------
+        token_texts, pooled_texts = [], []
+
+        for i in range(len(targets)):
+            mask = text_token_masks[i].bool()
+            Tf = txt_embs[i][mask]
+
+            if Tf.numel() == 0:
+                token_texts.append(None)
+                pooled_texts.append(None)
+            else:
+                token_texts.append(Tf)
+                pooled_texts.append(Tf.mean(dim=0))
+
+        # ------------------------------------------------------------
+        # Image-to-Text contrastive loss, Eq. (13)
+        # ------------------------------------------------------------
+        i2t_terms = []
+
+        for i, (src, _) in enumerate(indices):
+            if not src.numel() or pooled_texts[i] is None:
+                continue
+
+            S_m = F.normalize(img_embs[i, src], dim=-1)  # [Nm, D]
+            Tf_bar = F.normalize(pooled_texts[i], dim=-1)  # [D]
+            positive_logits = (S_m @ Tf_bar) / tau  # [Nm]
+
+            negative_ids = [j for j in range(len(targets))
+                            if j != i and groups[j] == groups[i]
+                            and class_names[j] == class_names[i]
+                            and attr_names[j] != attr_names[i]
+                            and pooled_texts[j] is not None]
+
+            if not negative_ids:
+                continue
+
+            Tf_h_bar = F.normalize(torch.stack([pooled_texts[j] for j in negative_ids]), dim=-1)  # [M, D]
+            negative_logits = (S_m @ Tf_h_bar.transpose(0, 1)) / tau  # [Nm, M]
+
+            logits = torch.cat([positive_logits.unsqueeze(-1), negative_logits], dim=-1)
+            i2t_terms.append((torch.logsumexp(logits, dim=-1) - positive_logits).mean())
+
+        loss_i2t = torch.stack(i2t_terms).mean() if i2t_terms else img_embs.sum() * 0
+
+        # ------------------------------------------------------------
+        # Text-to-Image contrastive loss, Eqs. (14)-(16)
+        # ------------------------------------------------------------
+        t2i_terms = []
+
+        for i, (src, _) in enumerate(indices):
+            if not src.numel() or pooled_texts[i] is None:
+                continue
+
+            num_query = img_embs.shape[1]
+            unmatched_mask = torch.ones(num_query, dtype=torch.bool, device=img_embs.device)
+            unmatched_mask[src] = False
+            unmatched_idx = unmatched_mask.nonzero(as_tuple=False).flatten()
+
+            if not unmatched_idx.numel():
+                continue
+
+            # S_um and its corresponding predicted coordinates R'_um.
+            S_um = img_embs[i, unmatched_idx]  # [Num, D]
+            R_um = pred_points[i, unmatched_idx]  # [Num, 2]
+
+            # Eq. (14): C_conf = sigmoid(S_um @ Tf^T).
+            Tf = token_texts[i]
+            S_um_norm = F.normalize(S_um, dim=-1)
+            Tf_norm = F.normalize(Tf, dim=-1)
+            C_confidence = torch.sigmoid(S_um_norm @ Tf_norm.transpose(0, 1))
+
+            semantic_mask = C_confidence.min(dim=1).values > sigma
+            if not semantic_mask.any():
+                continue
+
+            S_um = S_um[semantic_mask]
+            R_um = R_um[semantic_mask]
+
+            # Collect GT points from the same image, same class, different attributes.
+            gt_points_list = []
+            for j in range(len(targets)):
+                if (j == i or groups[j] != groups[i] or class_names[j] != class_names[i] or
+                        attr_names[j] == attr_names[i]):
+                    continue
+
+                points = targets[j].get("points", None)
+                if points is not None and len(points) > 0:
+                    points = torch.as_tensor(points, dtype=R_um.dtype, device=R_um.device)
+                    gt_points_list.append(points)
+
+            if not gt_points_list:
+                continue
+
+            R_gt_h = torch.cat(gt_points_list, dim=0)  # [Nh, 2]
+
+            # Convert normalized coordinates to pixel coordinates.
+            shape = targets[i]["shape"]
+            shape = torch.as_tensor(shape, device=R_um.device, dtype=R_um.dtype)
+            H, W = shape[0], shape[1]
+            scale = torch.stack([W, H])
+
+            R_um_pixel = R_um * scale
+            R_gt_h_pixel = R_gt_h * scale
+
+            # Eq. (15): select queries whose prediction is within 16 pixels
+            # of at least one GT object having a different attribute.
+            distance_matrix = torch.cdist(R_um_pixel, R_gt_h_pixel, p=2)
+            hard_negative_mask = distance_matrix.min(dim=1).values < gamma
+
+            if not hard_negative_mask.any():
+                continue
+
+            S_um_h = S_um[hard_negative_mask]  # [N_um^h, D]
+
+            # Eq. (16): positive visual samples are the Hungarian-matched
+            # queries S_m, while S_um_h are hard-negative visual samples.
+            S_m = F.normalize(img_embs[i, src], dim=-1)  # [Nm, D]
+            S_um_h = F.normalize(S_um_h, dim=-1)  # [Nh, D]
+            Tf_bar = F.normalize(pooled_texts[i], dim=-1)  # [D]
+
+            positive_logits = (S_m @ Tf_bar) / tau  # [Nm]
+            negative_logits = (S_m @ S_um_h.transpose(0, 1)) / tau  # [Nm, Nh]
+
+            logits = torch.cat([positive_logits.unsqueeze(-1), negative_logits], dim=-1)
+            t2i_terms.append((torch.logsumexp(logits, dim=-1) - positive_logits).mean())
+
+        loss_t2i = torch.stack(t2i_terms).mean() if t2i_terms else img_embs.sum() * 0
+
+        # Eq. (17)
+        loss_attr = (loss_i2t + loss_t2i) / 2
+
+        return {"loss_contrast_asd": loss_attr}
+
     def forward(self, outputs, targets, image_group_ids=None):
         indices = self.matcher(outputs, targets)
         losses = {}
@@ -198,9 +375,14 @@ class SetCriterion(nn.Module):
             elif loss == "points":
                 losses.update(self.loss_point(outputs, targets, indices))
             else:
-                losses.update(self.loss_contrast(
-                    outputs, targets, indices, image_group_ids=image_group_ids
-                ))
+                if self.ASD:
+                    losses.update(self.loss_contrast_asd(
+                        outputs, targets, indices, image_group_ids=image_group_ids
+                    ))
+                else:
+                    losses.update(self.loss_contrast(
+                        outputs, targets, indices, image_group_ids=image_group_ids
+                    ))
         # 加权求和
         weighted_losses = [
             losses[key] * self.weight_dict[key]

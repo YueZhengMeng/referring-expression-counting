@@ -291,10 +291,10 @@ if __name__ == '__main__':
         help='Path to the GroundingDINO configuration file',
     )
     parser.add_argument(
-        '--pretrained-checkpoint', default='/home/pwb/pwb/checkpoints/GroundingDINO/groundingdino_swint_ogc.pth',
+        '--pretrained-checkpoint', default='F:/GroundingDINO/groundingdino_swint_ogc.pth',
         help='Pretrained checkpoint used by the full model',
     )
-    parser.add_argument('--image-dir', default='/home/pwb/pwb/rec-8k')
+    parser.add_argument('--image-dir', default='F:/REC-8K/rec-8k')
     parser.add_argument('--annotations', default='anno/annotations.json')
     parser.add_argument('--splits', default='anno/splits.json')
     parser.add_argument('--epochs', type=int, default=30)
@@ -352,7 +352,7 @@ if __name__ == '__main__':
     # 冻结backbone和bert
     model = freeze_encoders(model)
     # 损失函数
-    criterion = SetCriterion()
+    criterion = SetCriterion(ASD=True)
     # 优化器
     optimizer = torch.optim.AdamW(
         trainable_parameters(model),

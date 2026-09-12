@@ -508,13 +508,11 @@ class GroundingDINO(nn.Module):
         # if self.aux_loss:
         #     out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord_list)
 
-        token_masks = text_dict["text_attribute_mask"]
         out = {
             "pred_logits": outputs_class[-1],  # 最后一层 decoder 输出的 query-token 匹配分数
             "pred_boxes": outputs_coord_list[-1],  # 最后一层 decoder 输出的预测 bbox
             "img_embs": hs[-1],  # 最后一层 decoder 输出的 query 特征
             "txt_embs": txt_embs,  # 经过 encoder 图文交互后的文本特征
-            "token_masks": token_masks,  # 也是 attribute_token_mask，为了兼容
             "text_token_mask": text_token_mask,  # 有效文本 token mask
             "text_logit_mask": text_logit_mask,  # 分类头使用的 token mask
             "attribute_token_mask": text_dict["text_attribute_mask"]  # attribute token mask
