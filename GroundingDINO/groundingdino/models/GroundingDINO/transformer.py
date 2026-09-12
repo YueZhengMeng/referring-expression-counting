@@ -356,7 +356,7 @@ class Transformer(nn.Module):
         if self.two_stage_type == "standard":
             # 为每个 Encoder 输出的 image token 生成候选框
             # 以每个 image token 在对应特征图中的位置为中心，不同的特征图尺度生成不同大小的候选框
-            output_memory, output_proposals = gen_encoder_output_proposals(
+            output_memory, output_proposals, proposal_valid = gen_encoder_output_proposals(
                 memory, mask_flatten, spatial_shapes
             )
             # 进一步映射和归一化 Encoder 输出的 image token
@@ -369,7 +369,9 @@ class Transformer(nn.Module):
                 enc_outputs_class_unselected = self.enc_out_class_embed(output_memory)
 
             # 取出 [CLS] token 的 匹配分数作为排序分数
-            topk_logits = enc_outputs_class_unselected[:, :, 0]  # (bs, \sum{hw})
+            topk_logits = enc_outputs_class_unselected[:, :, 0]
+            # 仅允许合法且非padding的proposal参与top-k选择
+            topk_logits = topk_logits.masked_fill(~proposal_valid, float("-inf"))
 
             # 修正后的边界框 = bbox head 预测增量 + 初始边界框
             enc_outputs_coord_unselected = (
@@ -378,6 +380,10 @@ class Transformer(nn.Module):
 
             # 选中的 image token 的索引 [bs, num_queries]
             topk = self.num_queries
+            if (proposal_valid.sum(dim=1) < topk).any():
+                raise ValueError(
+                    "Number of valid encoder proposals is smaller than num_queries"
+                )
             topk_proposals = torch.topk(topk_logits, topk, dim=1)[1]  # bs, num_queries
 
             """

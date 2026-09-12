@@ -5,6 +5,8 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 
+from groundingdino.util.text_utils import build_text_logit_mask, pad_text_logit_mask
+
 
 def seed_everything(seed):
     # 基础随机种子设置
@@ -52,34 +54,15 @@ def _period_token_ids(tokenizer):
 
 
 def tokenize_caption_targets(tokenizer, captions, max_text_len):
-    """Return target labels/masks without assuming a particular tokenizer id."""
+    """Return target labels/masks using the model's classification token policy."""
     tokenized = tokenizer(
         captions, padding="longest", truncation=True, max_length=max_text_len,
         return_tensors="pt", return_special_tokens_mask=True,
     )
-    input_ids = tokenized["input_ids"]
-    attention = tokenized["attention_mask"].bool()
-    # 预设填充到 max_text_len
-    labels = torch.zeros((len(captions), max_text_len), dtype=torch.float32)
-    valid = torch.zeros((len(captions), max_text_len), dtype=torch.bool)
-    period_ids = _period_token_ids(tokenizer)
-    for row in range(len(captions)):
-        # 获取非padding token的索引
-        valid_positions = torch.where(attention[row])[0]
-        # 默认以最后一个非padding token为结尾
-        end = int(valid_positions[-1]) + 1 if valid_positions.numel() else 0
-        # 获取句号的索引
-        period_positions = [int(i) for i in valid_positions.tolist()
-                            if int(input_ids[row, i]) in period_ids]
-        if period_positions:
-            # 有句号，则以句号为结尾
-            end = period_positions[-1]
-        if end:
-            # 存在结尾，即存在有效token，记录区间（不包括这个结尾token）
-            valid[row, :end] = True
-            labels[row, :end] = 1.0
-    # valid[row] == labels[row].bool()
-    return labels, valid
+    valid = pad_text_logit_mask(
+        build_text_logit_mask(tokenizer, tokenized), max_text_len
+    )
+    return valid.to(dtype=torch.bool).float(), valid.to(dtype=torch.bool)
 
 
 def prepare_targets(anno_b, captions, shapes, tokenizer, image_group_ids=None,

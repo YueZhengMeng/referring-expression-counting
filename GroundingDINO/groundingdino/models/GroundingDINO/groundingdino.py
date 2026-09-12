@@ -28,6 +28,7 @@ from groundingdino.util.misc import (
     inverse_sigmoid,
     nested_tensor_from_tensor_list,
 )
+from groundingdino.util.text_utils import build_text_logit_mask, pad_text_logit_mask
 from .backbone import build_backbone
 from .bertwarper import (
     BertModelWarper,
@@ -374,6 +375,9 @@ class GroundingDINO(nn.Module):
 
         # text_token_mask: True for nomask, False for mask
         text_token_mask = tokenized["attention_mask"].bool()  # bs, seq_len
+        text_logit_mask = pad_text_logit_mask(
+            build_text_logit_mask(self.tokenizer, tokenized), self.max_text_len
+        )
         special_token_mask = tokenized["special_tokens_mask"].bool()  # bs, seq_len
 
         # 计算 subject、context、attribute 分别对应原 caption 中哪些 token
@@ -405,6 +409,7 @@ class GroundingDINO(nn.Module):
         text_dict = {
             "encoded_text": encoded_text,  # bs, seq_len, d_model
             "text_token_mask": text_token_mask,  # bs, seq_len
+            "text_logit_mask": text_logit_mask,  # bs, max_text_len
             "position_ids": position_ids,  # bs, seq_len
             "text_self_attention_masks": text_self_attention_masks,  # bs, seq_len, seq_len
             "text_subject_mask": text_subject_mask,  # bs, seq_len
@@ -510,7 +515,8 @@ class GroundingDINO(nn.Module):
             "img_embs": hs[-1],  # 最后一层 decoder 输出的 query 特征
             "txt_embs": txt_embs,  # 经过 encoder 图文交互后的文本特征
             "token_masks": token_masks,  # 也是 attribute_token_mask，为了兼容
-            "text_token_mask": text_dict["text_token_mask"],  # 有效文本 token mask
+            "text_token_mask": text_token_mask,  # 有效文本 token mask
+            "text_logit_mask": text_logit_mask,  # 分类头使用的 token mask
             "attribute_token_mask": text_dict["text_attribute_mask"]  # attribute token mask
         }
 

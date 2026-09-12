@@ -115,6 +115,14 @@ def threshold(
         cls_index, content_indices = _valid_caption_token_indices(
             tokenizer, encoded, punctuation_ids
         )
+        # 优先复用模型生成的分类token mask，确保推理与训练使用同一语义。
+        model_text_mask = outputs.get("text_logit_mask")
+        if model_text_mask is not None:
+            model_text_mask = model_text_mask[b].detach().cpu().bool()
+            content_indices = [
+                index for index in torch.where(model_text_mask)[0].tolist()
+                if index != cls_index
+            ]
         # cls token 得分大于box_threshold阈值
         mask1 = prediction_logits[:, cls_index].gt(box_threshold)
         # 且其他有效 token 得分大于token_threshold阈值

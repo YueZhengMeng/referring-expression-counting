@@ -65,6 +65,7 @@ def gen_encoder_output_proposals(
     Output:
         - output_memory: bs, \sum{hw}, d_model
         - output_proposals: bs, \sum{hw}, 4
+        - proposal_valid: bs, \sum{hw}, valid non-padding proposals
     """
     N_, S_, C_ = memory.shape
     proposals = []
@@ -114,7 +115,8 @@ def gen_encoder_output_proposals(
     # output_memory = output_memory.masked_fill(memory_padding_mask.unsqueeze(-1), float('inf'))
     # output_memory = output_memory.masked_fill(~output_proposals_valid, float('inf'))
 
-    return output_memory, output_proposals
+    proposal_valid = output_proposals_valid.squeeze(-1) & ~memory_padding_mask
+    return output_memory, output_proposals, proposal_valid
 
 
 class RandomBoxPerturber:
@@ -260,11 +262,12 @@ class ContrastiveEmbed(nn.Module):
         assert isinstance(text_dict, dict)
 
         y = text_dict["encoded_text"]
-        text_token_mask = text_dict["text_token_mask"]
+        text_token_mask = text_dict["text_logit_mask"]
 
         # 点乘获取相似度矩阵 (bs, num_visual_tokens, seq_len)
         res = x @ y.transpose(-1, -2)
-        # 无效 token 位置填充 -inf
+        # 分类mask按实际编码序列截断；无效token位置填充-inf
+        text_token_mask = text_token_mask[..., :res.shape[-1]]
         res.masked_fill_(~text_token_mask[:, None, :], float("-inf"))
 
         # padding to max_text_len
