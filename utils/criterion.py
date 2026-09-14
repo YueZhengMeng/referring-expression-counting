@@ -10,6 +10,8 @@ class HungarianMatcher(nn.Module):
         self.cost_class = cost_class
         self.cost_point = cost_point
         self.cost_rep = cost_rep
+        if cost_rep < 0:
+            raise ValueError("cost_rep must be non-negative")
         if cost_class == 0 and cost_point == 0 and cost_rep == 0:
             raise ValueError("all matching costs cannot be zero")
 
@@ -28,19 +30,20 @@ class HungarianMatcher(nn.Module):
                 indices.append((empty, empty.clone()))
                 continue
 
-            # 找到同一张图、同一 class 下的其他 target，作为 Y_neg
-            negative_points_list = [
-                other_target["points"].to(points.device)
-                for other_target in targets
-                if other_target is not target
-                   and other_target["image_group_id"] == target["image_group_id"]
-                   and other_target["class_name"] == target["class_name"]
-            ]
+            if self.cost_rep > 0:
+                # 找到同一张图、同一 class 下的其他 target，作为 Y_neg
+                negative_points_list = [
+                    other_target["points"].to(points.device)
+                    for other_target in targets
+                    if other_target is not target
+                       and other_target["image_group_id"] == target["image_group_id"]
+                       and other_target["class_name"] == target["class_name"]
+                ]
 
-            if negative_points_list:
-                negative_points = torch.cat(negative_points_list, dim=0)
-            else:
-                negative_points = target_points.new_empty((0, target_points.shape[-1]))
+                if negative_points_list:
+                    negative_points = torch.cat(negative_points_list, dim=0)
+                else:
+                    negative_points = target_points.new_empty((0, target_points.shape[-1]))
 
             # 取出有效token集合，默认全为True
             valid = target.get("valid_token_mask")
@@ -73,7 +76,10 @@ class HungarianMatcher(nn.Module):
             # 计算预测点与真实点之间的L1/曼哈顿距离
             point_cost = torch.cdist(points[batch_index], target_points, p=1)
 
-            # SSM repulsive cost
+            # SSM repulsive cost；cost_rep=0 时保持为零，即关闭该项
+            repulsive_cost = points[batch_index].new_zeros(
+                (points[batch_index].shape[0], n_targets)
+            )
             if self.cost_rep > 0 and negative_points.numel() > 0:
                 # [Q, N_neg] -> [Q]
                 nearest_negative_dist = torch.cdist(
@@ -90,10 +96,6 @@ class HungarianMatcher(nn.Module):
 
                 # C_rep(p_hat_i, p_j) = exp(-R)
                 repulsive_cost = torch.exp(-ambiguity_ratio)
-            else:
-                repulsive_cost = points[batch_index].new_zeros(
-                    (points[batch_index].shape[0], n_targets)
-                )
 
             # 总成本 = 类别成本 + 点成本 + SSM repulsive cost
             cost = self.cost_class * class_cost + self.cost_point * point_cost + self.cost_rep * repulsive_cost
@@ -108,16 +110,32 @@ class HungarianMatcher(nn.Module):
 
 
 class SetCriterion(nn.Module):
-    def __init__(self, ASD=False):
+    def __init__(self, use_contrast_rec=False, contrast_rec_weight=0.06,
+                 use_contrast_attr=False, contrast_attr_weight=0.06,
+                 use_contrast_asd=False, contrast_asd_weight=0.015,
+                 use_contrast_img_hm=False, contrast_img_hm_weight=0.06,
+                 cost_rep=0.2):
         super().__init__()
-        self.matcher = HungarianMatcher(cost_class=5, cost_point=1)
+        self.matcher = HungarianMatcher(cost_class=5, cost_point=1, cost_rep=cost_rep)
         self.losses = ["labels", "points", "contrast"]
         self.weight_dict = {"loss_label": 5, "loss_point": 1}
-        self.ASD = ASD
-        if ASD:
-            self.weight_dict["loss_contrast_asd"] = 0.015
-        else:
-            self.weight_dict["loss_contrast"] = 0.06
+
+        # 三种 text 对比最多只选一种
+        if sum(map(bool, (use_contrast_rec, use_contrast_asd, use_contrast_attr))) > 1:
+            raise ValueError("only one text contrast can be used")
+        self.use_contrast_rec = use_contrast_rec
+        self.use_contrast_asd = use_contrast_asd
+        self.use_contrast_attr = use_contrast_attr
+        if use_contrast_rec:
+            self.weight_dict["loss_contrast_rec"] = contrast_rec_weight
+        elif self.use_contrast_attr:
+            self.weight_dict["loss_contrast_attr"] = contrast_attr_weight
+        elif self.use_contrast_asd:
+            self.weight_dict["loss_contrast_asd"] = contrast_asd_weight
+        # 是否使用 C-REX 图像对比
+        self.use_contrast_img_hm = use_contrast_img_hm
+        if self.use_contrast_img_hm:
+            self.weight_dict["loss_contrast_img_hm"] = contrast_img_hm_weight
 
     @staticmethod
     def _matched(outputs, targets, indices, key):
@@ -128,7 +146,7 @@ class SetCriterion(nn.Module):
             return values.new_empty((0,) + values.shape[2:]), []
         return torch.cat(chunks, dim=0), [src.numel() for src, _ in indices]
 
-    def loss_label(self, outputs, targets, indices, **kwargs):
+    def loss_label(self, outputs, targets, indices, alpha=0.25, gamma=2, **kwargs):
         logits = outputs["pred_logits"]
         # 未匹配的query保持全0，作为背景/no-object目标
         target_labels = torch.zeros_like(logits)
@@ -153,8 +171,8 @@ class SetCriterion(nn.Module):
         )
         probability = safe_logits.sigmoid()
         p_t = probability * target_labels + (1 - probability) * (1 - target_labels)
-        alpha_t = 0.25 * target_labels + 0.75 * (1 - target_labels)
-        element = alpha_t * ((1 - p_t) ** 2) * element
+        alpha_t = alpha * target_labels + (1 - alpha) * (1 - target_labels)
+        element = alpha_t * ((1 - p_t) ** gamma) * element
         element = element.masked_fill(~valid_masks, 0)
 
         # 每个caption按query数和有效token数归一化，再对batch求平均
@@ -182,13 +200,13 @@ class SetCriterion(nn.Module):
             return None
         return txt[mask].mean(dim=0)
 
-    def loss_contrast(self, outputs, targets, indices, image_group_ids=None, **kwargs):
+    def loss_contrast_attr(self, outputs, targets, indices, image_group_ids=None, **kwargs):
         img_embs = outputs["img_embs"]
         txt_embs = outputs["txt_embs"]
         # 取出属性 token 的 mask
         token_masks = outputs["attribute_token_mask"]
         if token_masks is None:
-            return {"loss_contrast": img_embs.sum() * 0}
+            return {"loss_contrast_attr": img_embs.sum() * 0}
         groups = image_group_ids
         if groups is None:
             groups = [target.get("image_group_id", i) for i, target in enumerate(targets)]
@@ -231,9 +249,125 @@ class SetCriterion(nn.Module):
             # 不同 caption 的目标数量不同时，损失大致按每个 query 平均
             terms.append((positive_term + negative_term) / src.numel())
         if not terms:
-            return {"loss_contrast": img_embs.sum() * 0}
+            return {"loss_contrast_attr": img_embs.sum() * 0}
         # 返回所有 caption 的平均损失
-        return {"loss_contrast": torch.stack(terms).mean()}
+        return {"loss_contrast_attr": torch.stack(terms).mean()}
+
+    def loss_contrast_rec(self, outputs, targets, indices, image_group_ids=None, **kwargs):
+        """GroundingREC image-text contrastive loss using matched image tokens."""
+        img_embs = outputs["img_embs"]
+        txt_embs = outputs["txt_embs"]
+
+        # 取所有有效 token 的 mask
+        token_masks = outputs["text_token_mask"]
+        if token_masks is None:
+            return {"loss_contrast_rec": img_embs.sum() * 0}
+
+        terms = []
+        for batch_index, (src, _) in enumerate(indices):
+            if not src.numel():
+                continue
+
+            mask = token_masks[batch_index].to(device=txt_embs.device, dtype=torch.bool)
+            if mask.ndim != 1 or mask.shape[0] != txt_embs.shape[1] or not mask.any():
+                continue
+            # 当前 RE 匹配的 image token
+            matched_img_embs = F.normalize(img_embs[batch_index, src], p=2, dim=-1)
+            # 当前 RE 有效 token 的平均特征向量
+            positive_txt = F.normalize(txt_embs[batch_index, mask].mean(dim=0), p=2, dim=-1)
+            # 计算正样本余弦相似度
+            positive_logits = matched_img_embs @ positive_txt
+
+            # Uses other captions of the same image as text negatives.
+            # 同一张图像的其他 caption 作为 text 负样本
+            group = (image_group_ids[batch_index]
+                     if image_group_ids is not None else
+                     targets[batch_index].get("image_group_id", batch_index))
+            negative_embeddings = []
+            for j, target in enumerate(targets):
+                other_group = (image_group_ids[j]
+                               if image_group_ids is not None else
+                               target.get("image_group_id", j))
+                if j == batch_index or other_group != group:
+                    continue
+                other_mask = token_masks[j].to(device=txt_embs.device, dtype=torch.bool)
+                if other_mask.ndim == 1 and other_mask.shape[0] == txt_embs.shape[1] and other_mask.any():
+                    negative_embeddings.append(txt_embs[j, other_mask].mean(dim=0))
+
+            # The original loss is defined only when a same-image negative caption exists
+            # Otherwise this sample contributes zero.
+            if not negative_embeddings:
+                continue
+
+            # 计算负样本余弦相似度
+            negative_txt = F.normalize(torch.stack(negative_embeddings), p=2, dim=-1)
+            negative_logits = matched_img_embs @ negative_txt.transpose(0, 1)
+
+            # 正样本损失和负样本损失的平均值
+            positive_term = -F.logsigmoid(positive_logits).sum()
+            negative_term = -F.logsigmoid(-negative_logits).sum()
+            terms.append((positive_term + negative_term) / src.numel())
+
+        if not terms:
+            return {"loss_contrast_rec": img_embs.sum() * 0}
+        return {"loss_contrast_rec": torch.stack(terms).mean()}
+
+    def loss_contrast_img_hm(self, outputs, targets, indices, temperature=0.07, **kwargs):
+        """C-REX image-space supervised contrastive loss.
+
+        Matched decoder queries are positive samples and all remaining queries
+        from the same image are negatives.  Only positive queries are used as
+        anchors, as in the modified SupCon objective from C-REX.
+        """
+        img_embs = outputs["img_embs"]  # [B, num_queries, embedding_dim]
+        temperature = max(float(temperature), 1e-6)
+        num_queries = img_embs.shape[1]
+
+        terms = []
+        for batch_index, (src, _) in enumerate(indices):
+            # At least two positive queries are needed to form a positive pair.
+            # 其中一个是 anchor，至少还需要一个
+            if src.numel() < 2:
+                continue
+            # 转移索引设备，并过滤掉无效的索引
+            src = src.to(device=img_embs.device, dtype=torch.long)
+            src = src[(src >= 0) & (src < num_queries)]
+            src = torch.unique(src)
+            if src.numel() < 2:
+                continue
+
+            # logits[i, j] 表示第 i 个正 query 与第 j 个 query 的温度缩放余弦相似度
+            embeddings = F.normalize(img_embs[batch_index], dim=-1)
+            logits = embeddings[src] @ embeddings.transpose(0, 1)
+            logits = logits / temperature  # [num_positive, num_queries]
+
+            # Remove each anchor's self-similarity from the denominator.
+            # 去掉 anchor 自身
+            anchor_rows = torch.arange(src.numel(), device=img_embs.device)
+            self_mask = torch.zeros_like(logits, dtype=torch.bool)
+            self_mask[anchor_rows, src] = True
+            logits = logits.masked_fill(self_mask, float("-inf"))
+            # log-sum-exp：计算每个 anchor 的除自身外所有 query 的 log 概率和
+            denominator = torch.logsumexp(logits, dim=1)
+
+            # All other matched queries are positives; unmatched queries are negatives.
+            # Negative tokens are not pulled toward each other.
+            # 标记正样本
+            positive_mask = torch.zeros_like(logits, dtype=torch.bool)
+            positive_mask[:, src] = True
+            positive_mask &= ~self_mask
+            # 负样本不聚合
+            positive_logits = logits.masked_fill(~positive_mask, float("-inf"))
+            positive_logsumexp = torch.logsumexp(positive_logits, dim=1)
+
+            # Eq. (2): -log(mean positive probability).
+            # 按每个 anchor 的正样本数量求平均
+            normalizer = torch.log(img_embs.new_tensor(float(src.numel() - 1)))
+            terms.append((denominator - positive_logsumexp + normalizer).mean())
+
+        if not terms:
+            return {"loss_contrast_img_hm": img_embs.sum() * 0}
+        return {"loss_contrast_img_hm": torch.stack(terms).mean()}
 
     def loss_contrast_asd(self, outputs, targets, indices, image_group_ids=None, **kwargs):
         """
@@ -254,7 +388,7 @@ class SetCriterion(nn.Module):
         text_token_masks = outputs["text_token_mask"]
 
         if text_token_masks is None:
-            return {"loss_contrast": img_embs.sum() * 0}
+            return {"loss_contrast_asd": img_embs.sum() * 0}
 
         # Hyperparameters from the paper / default setting.
         sigma = 0.35  # semantic threshold
@@ -415,14 +549,21 @@ class SetCriterion(nn.Module):
             elif loss == "points":
                 losses.update(self.loss_point(outputs, targets, indices))
             else:
-                if self.ASD:
+                if self.use_contrast_rec:
+                    losses.update(self.loss_contrast_rec(
+                        outputs, targets, indices, image_group_ids=image_group_ids
+                    ))
+                elif self.use_contrast_attr:
+                    losses.update(self.loss_contrast_attr(
+                        outputs, targets, indices, image_group_ids=image_group_ids
+                    ))
+                elif self.use_contrast_asd:
                     losses.update(self.loss_contrast_asd(
                         outputs, targets, indices, image_group_ids=image_group_ids
                     ))
-                else:
-                    losses.update(self.loss_contrast(
-                        outputs, targets, indices, image_group_ids=image_group_ids
-                    ))
+
+                if self.use_contrast_img_hm:
+                    losses.update(self.loss_contrast_img_hm(outputs, targets, indices))
         # 加权求和
         weighted_losses = [
             losses[key] * self.weight_dict[key]
