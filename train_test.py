@@ -352,7 +352,7 @@ if __name__ == '__main__':
     # 冻结backbone和bert
     model = freeze_encoders(model)
     # 损失函数
-    criterion = SetCriterion(cost_rep=0)
+    criterion = SetCriterion(use_contrast_rec=True, cost_rep=0)
     # 优化器
     optimizer = torch.optim.AdamW(
         trainable_parameters(model),
