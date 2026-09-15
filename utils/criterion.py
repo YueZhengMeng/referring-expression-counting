@@ -113,7 +113,7 @@ class SetCriterion(nn.Module):
     def __init__(self, use_contrast_rec=False, contrast_rec_weight=0.06,
                  use_contrast_attr=False, contrast_attr_weight=0.06,
                  use_contrast_asd=False, contrast_asd_weight=0.015,
-                 use_contrast_img_hm=False, contrast_img_hm_weight=0.06,
+                 use_contrast_img=False, contrast_img_weight=0.005,
                  cost_rep=0.2):
         super().__init__()
         self.matcher = HungarianMatcher(cost_class=5, cost_point=1, cost_rep=cost_rep)
@@ -133,9 +133,9 @@ class SetCriterion(nn.Module):
         elif self.use_contrast_asd:
             self.weight_dict["loss_contrast_asd"] = contrast_asd_weight
         # 是否使用 C-REX 图像对比
-        self.use_contrast_img_hm = use_contrast_img_hm
-        if self.use_contrast_img_hm:
-            self.weight_dict["loss_contrast_img_hm"] = contrast_img_hm_weight
+        self.use_contrast_img = use_contrast_img
+        if self.use_contrast_img:
+            self.weight_dict["loss_contrast_img"] = contrast_img_weight
 
     @staticmethod
     def _matched(outputs, targets, indices, key):
@@ -312,12 +312,102 @@ class SetCriterion(nn.Module):
             return {"loss_contrast_rec": img_embs.sum() * 0}
         return {"loss_contrast_rec": torch.stack(terms).mean()}
 
+    def loss_contrast_img(self, outputs, targets, indices, image_group_ids=None,
+                          temperature=0.07, **kwargs):
+        """
+        C-REX
+        文本引导的正样本选择
+        """
+        assert "img_embs" in outputs and "txt_embs" in outputs
+
+        img_embs = outputs["img_embs"]
+        txt_embs = outputs["txt_embs"]
+        token_masks = outputs["text_token_mask"]
+        # 每个 caption 的 GT 数量
+        num_points_per_cap = torch.tensor(
+            [target["points"].shape[0] for target in targets],
+            device=img_embs.device,
+        )
+
+        # 计算每个 image query 与 caption 平均向量的余弦相似度
+        txt_emb_sum = torch.sum(txt_embs * token_masks.unsqueeze(-1), dim=1)
+        txt_embs = txt_emb_sum / token_masks.sum(dim=1, keepdim=True)
+        img_embs_norm = F.normalize(img_embs, p=2, dim=2)
+        txt_embs_norm = F.normalize(txt_embs, p=2, dim=1)
+        token_text_sim = torch.matmul(img_embs_norm, txt_embs_norm.unsqueeze(2)).squeeze(-1)
+
+        idx = []
+        t_n = []
+        # 根据文本相似度选择 top-k 正样本
+        for i in range(token_text_sim.shape[0]):
+            # 选择数量等于真实目标数量，但最多 900 个
+            _, top_n_indices = torch.topk(
+                token_text_sim[i], min(900, num_points_per_cap[i].item()), dim=-1
+            )
+            # 生成正样本 mask
+            t_ = torch.zeros_like(img_embs[0, :, 0], dtype=torch.int)
+            t_.scatter_(0, top_n_indices, 1)
+            t_n.append(top_n_indices)
+            idx.append(t_)
+
+        t_ = torch.stack(idx, 0)
+
+        # 计算 query 与 query 之间的图像相似度
+        dot_product_tempered = torch.matmul(
+            img_embs_norm, img_embs_norm.permute(0, 2, 1)
+        ) / temperature
+
+        # 指数化并进行数值稳定处理
+        exp_dot_tempered = (
+                torch.exp(
+                    dot_product_tempered
+                    - torch.max(dot_product_tempered, dim=2, keepdim=True)[0]
+                )
+                + 1e-5
+        )
+
+        # 去除 query 与自身的相似度
+        mask_anchor_out = 1 - torch.eye(
+            exp_dot_tempered.shape[1], device=img_embs.device
+        )
+        exp_msk_me = exp_dot_tempered * mask_anchor_out
+
+        # 计算每个 anchor 的总相似度分母
+        d_ = torch.sum(exp_msk_me, dim=1)
+
+        ll = []
+        for i in range(token_text_sim.shape[0]):
+            # 取出所有正样本 anchor 的分母
+            denom = torch.gather(d_[i], 0, t_n[i])
+            # 只保留与正样本 query 的相似度，与负 query 的相似度清零
+            numm = torch.sum(exp_msk_me[i] * t_[i].unsqueeze(0), dim=1)
+            # 取出所有正样本 anchor 的分子
+            numm = torch.gather(numm, 0, t_n[i])
+            # 计算损失
+            l = numm / denom
+            if num_points_per_cap[i] < 2:
+                # 两个正样本损失为 0
+                l = torch.tensor(0.0, device=img_embs.device)
+            else:
+                # 对于一个正样本 anchor，除去自己后，理论上还有多少个正样本
+                l = -torch.log(l / (num_points_per_cap[i] - 1))
+            # caption 求平均
+            l = torch.mean(l)
+
+            ll.append(l)
+
+        loss = torch.stack(ll).mean()
+
+        losses = {}
+        losses["loss_contrast_img"] = loss
+
+        return losses
+
     def loss_contrast_img_hm(self, outputs, targets, indices, temperature=0.07, **kwargs):
         """C-REX image-space supervised contrastive loss.
-
-        Matched decoder queries are positive samples and all remaining queries
-        from the same image are negatives.  Only positive queries are used as
-        anchors, as in the modified SupCon objective from C-REX.
+        Hungarian 匹配引导的正样本选择
+        Matched decoder queries are positive samples and all remaining queries from the same image are negatives.
+        Only positive queries are used as anchors, as in the modified SupCon objective from C-REX.
         """
         img_embs = outputs["img_embs"]  # [B, num_queries, embedding_dim]
         temperature = max(float(temperature), 1e-6)
@@ -562,8 +652,8 @@ class SetCriterion(nn.Module):
                         outputs, targets, indices, image_group_ids=image_group_ids
                     ))
 
-                if self.use_contrast_img_hm:
-                    losses.update(self.loss_contrast_img_hm(outputs, targets, indices))
+                if self.use_contrast_img:
+                    losses.update(self.loss_contrast_img(outputs, targets, indices))
         # 加权求和
         weighted_losses = [
             losses[key] * self.weight_dict[key]
