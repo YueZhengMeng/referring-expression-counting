@@ -4,7 +4,7 @@ import os
 import sys
 
 import torch
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 from tqdm import tqdm
 
 sys.path.append('GroundingDINO')
@@ -55,7 +55,7 @@ def _caption_count(loader):
 
 
 def train(model, loader, annotations, criterion, optimizer,
-          lr_scheduler, device, epoch, text_threshold, box_threshold, token_threshold):
+          device, epoch, text_threshold, box_threshold, token_threshold):
     print('Training on train set data')
     # 设置backbone和bert为eval模式，其他需要训练的部分为train模式
     model = set_finetuning_mode(model)
@@ -121,8 +121,6 @@ def train(model, loader, annotations, criterion, optimizer,
         loss.backward()
         # 更新参数
         optimizer.step()
-        # 更新学习率
-        lr_scheduler.step()
 
         # 筛选预测框、置信度和对应的文本
         results = threshold(
@@ -282,7 +280,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--seed', type=int,
-        default=2025,
+        default=42,
         help='Random seed',
     )
     parser.add_argument(
@@ -305,6 +303,10 @@ if __name__ == '__main__':
     )
     parser.add_argument('--learning-rate', type=float, default=1e-5)
     parser.add_argument('--weight-decay', type=float, default=1e-4)
+    parser.add_argument(
+        '--scheduler', choices=['plateau', 'steplr'], default='plateau',
+        help="Learning-rate scheduler. 'plateau' for REC-8K(default), and 'steplr' for fsc-147",
+    )
     parser.add_argument(
         '--text_threshold', '--text-threshold', dest='text_threshold', type=float,
         default=0.25, help='Minimum text score for keeping a prediction',
@@ -352,21 +354,20 @@ if __name__ == '__main__':
     # 冻结backbone和bert
     model = freeze_encoders(model)
     # 损失函数
-    criterion = SetCriterion(use_contrast_img_hm=True, cost_rep=0)
+    criterion = SetCriterion(use_contrast_img=True, cost_rep=0)
     # 优化器
     optimizer = torch.optim.AdamW(
         trainable_parameters(model),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
-    # 计算训练步数
-    steps_every_epoch = len(loaders['train'])
-    total_train_steps = steps_every_epoch * int(args.epochs)
-    # 定义带预热的线性递减学习率调度器
-    # 从最大学习率的25分之一开始，在总步数的前10%逐渐线性增大到最大学习率，然后逐步线性递减到最大学习率的万分之一
-    # 避免模型不收敛或者过拟合
-    lr_scheduler = OneCycleLR(optimizer, max_lr=args.learning_rate, total_steps=total_train_steps,
-                              anneal_strategy='linear', pct_start=0.1, div_factor=25.0, final_div_factor=10000.0)
+    scheduler_kind = args.scheduler
+    if scheduler_kind == 'plateau':
+        lr_scheduler = ReduceLROnPlateau(
+            optimizer, mode='max', patience=7, min_lr=1e-7, threshold=2e-3,
+        )
+    else:
+        lr_scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 
     os.makedirs(args.stats_dir, exist_ok=True)
     stats_file = os.path.join(args.stats_dir, 'stats.csv')
@@ -388,7 +389,7 @@ if __name__ == '__main__':
     model_name = os.path.join(args.stats_dir, f'best_model.pth')
     for epoch in range(args.epochs):
         train_metrics = train(
-            model, loaders['train'], annotations, criterion, optimizer, lr_scheduler, device,
+            model, loaders['train'], annotations, criterion, optimizer, device,
             epoch, args.text_threshold, args.box_threshold, args.token_threshold,
         )
         val_metrics = eval(
@@ -400,6 +401,10 @@ if __name__ == '__main__':
             args.text_threshold, args.box_threshold, args.token_threshold, epoch,
         )
         val_mae = val_metrics[0]
+        if scheduler_kind == 'plateau':
+            lr_scheduler.step(val_metrics[7])
+        else:
+            lr_scheduler.step()
 
         _write_stats_line(
             stats_file,
