@@ -345,14 +345,14 @@ if __name__ == '__main__':
 
     if args.resume_checkpoint:
         print(f'Loading resume checkpoint: {args.resume_checkpoint}')
-        model = load_model(args.config, args.resume_checkpoint, device=device).to(device)
+        model = load_model(args.config, args.resume_checkpoint, device=device, global_local_fusion=True).to(device)
     else:
-        model = load_model(args.config, args.pretrained_checkpoint, device=device).to(device)
+        model = load_model(args.config, args.pretrained_checkpoint, device=device, global_local_fusion=True).to(device)
 
     # 冻结backbone和bert
     model = freeze_encoders(model)
     # 损失函数
-    criterion = SetCriterion(cost_rep=0)
+    criterion = SetCriterion(use_contrast_rec=True, cost_rep=0)
     # 优化器
     optimizer = torch.optim.AdamW(
         trainable_parameters(model),
@@ -426,7 +426,7 @@ if __name__ == '__main__':
 
     print(f'Inference on test set using best model: {model_name}')
     # 加载最佳模型，并设置为测试模式
-    test_model = load_model(args.config, model_name, device=device).to(device)
+    test_model = load_model(args.config, model_name, device=device, global_local_fusion=True).to(device)
     test_model = freeze_encoders(test_model)
     test_model.eval()
     # 测试集评估
