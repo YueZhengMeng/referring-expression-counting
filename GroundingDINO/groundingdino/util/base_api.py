@@ -18,15 +18,34 @@ def preprocess_caption(caption: str) -> str:
     return result + "."
 
 
-def load_model(model_config_path: str, model_checkpoint_path: str, device: str = "cuda"):
+def load_model(
+        model_config_path: str,
+        model_checkpoint_path: str,
+        device: str = "cuda",
+        global_local_fusion: bool = False,
+        DCount: bool = False,
+        W2NET: bool = False,
+):
+    if DCount and W2NET:
+        raise ValueError("DCount and W2NET are mutually exclusive")
+
     args = SLConfig.fromfile(model_config_path)
     args.device = device
+    args.global_local_fusion = global_local_fusion
+    args.DCount = DCount
+    args.W2NET = W2NET
     model = build_model(args)
     # 加载检查点（映射到 CPU 避免显存占用）
     checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
     # clean_state_dict 清洗键名（若需要）
+    state_dict = clean_state_dict(checkpoint["model"])
+    # 旧 checkpoint 没有 W2S query；以已预训练的 W2C query 作为相同初值。
+    w2c_query_key = "transformer.tgt_embed.weight"
+    w2s_query_key = "transformer.w2s_tgt_embed.weight"
+    if W2NET and w2s_query_key not in state_dict and w2c_query_key in state_dict:
+        state_dict[w2s_query_key] = state_dict[w2c_query_key].clone()
     # 加载参数到模型，strict=False 允许部分匹配
-    model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model
 
@@ -83,7 +102,6 @@ def threshold(
         text_threshold: float = 0.25,
         box_threshold: float = 0.25,
         token_threshold: float = 0.35):
-
     bs = outputs["pred_logits"].shape[0]
     # Tokenize all captions once; the same encoded rows are reused below.
     tokenized_batch = tokenizer(

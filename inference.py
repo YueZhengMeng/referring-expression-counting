@@ -22,6 +22,7 @@ from utils.image_loader import get_loader
 from utils.processor import DataProcessor
 from utils.criterion import SetCriterion
 
+
 def sanitize_filename(s):
     """Sanitize a string to be safe for use as a filename."""
     return re.sub(r'[<>:"/\\|?*\s]', '_', s)

@@ -235,6 +235,21 @@ class GroundingDINO(nn.Module):
         self.transformer.decoder.bbox_embed = self.bbox_embed
         self.transformer.decoder.class_embed = self.class_embed
 
+        if transformer.w2net:
+            # W2S 使用与 public W2C head 参数独立的 localization head。
+            _w2s_bbox_embed = copy.deepcopy(_bbox_embed)
+            if dec_pred_bbox_embed_share:
+                w2s_box_embed_layerlist = [
+                    _w2s_bbox_embed for _ in range(transformer.num_decoder_layers)
+                ]
+            else:
+                w2s_box_embed_layerlist = [
+                    copy.deepcopy(_w2s_bbox_embed)
+                    for _ in range(transformer.num_decoder_layers)
+                ]
+            self.w2s_bbox_embed = nn.ModuleList(w2s_box_embed_layerlist)
+            self.transformer.decoder.w2s_bbox_embed = self.w2s_bbox_embed
+
         # two-stage proposal
         # two_stage_type="no"：query 来自可学习 embedding
         # two_stage_type="standard"：query 来自 encoder 生成的 top-k proposal
@@ -470,20 +485,32 @@ class GroundingDINO(nn.Module):
         # init_box_proposal：Encoder 选出的原始 top-k proposal box，未经过 encoder bbox head 的修正，[bs, num_queries, 4]
         # img_embs：经过 Encoder 图文交互后的 image 特征，经过选择与融合后作为 query，[bs, num_queries, 256]
         # txt_embs：经过 Encoder 图文交互后的文本特征，[bs, seq_len, 256]
-        hs, reference, hs_enc, ref_enc, init_box_proposal, img_embs, txt_embs = self.transformer(
+        hs, reference, hs_enc, ref_enc, init_box_proposal, img_embs, txt_embs, position_hs = self.transformer(
             srcs, masks, input_query_bbox, self.poss, input_query_label, attn_mask, text_dict
         )
 
+        # DCount 的坐标来自 positional branch；标准模式仍使用原 content query。
+        coordinate_hs = position_hs if position_hs is not None else hs
         # deformable-detr-like anchor update
         outputs_coord_list = []
         # 取每个 decoder layer 输入的 reference box（排除 decoder 最后一层输出的 reference box）
         for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(
-                zip(reference[:-1], self.bbox_embed, hs)
+                zip(reference[:-1], self.bbox_embed, coordinate_hs)
         ):
             # 计算每层的 bbox 的预测偏移量
             layer_delta_unsig = layer_bbox_embed(layer_hs)
-            # 与原始 reference box 相加，得到最终的预测 bbox
-            layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
+            if layer_ref_sig.shape[-1] == 2:
+                # DCount 只迭代更新中心点；保留四维输出以兼容现有计数接口。
+                layer_outputs_unsig = torch.cat(
+                    [
+                        layer_delta_unsig[..., :2] + inverse_sigmoid(layer_ref_sig),
+                        layer_delta_unsig[..., 2:],
+                    ],
+                    dim=-1,
+                )
+            else:
+                # 与原始 reference box 相加，得到最终的预测 bbox
+                layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
             layer_outputs = layer_outputs_unsig.sigmoid()
             # 逐层保存预测 bbox
             outputs_coord_list.append(layer_outputs)

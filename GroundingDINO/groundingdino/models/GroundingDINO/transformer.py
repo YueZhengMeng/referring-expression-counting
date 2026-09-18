@@ -72,8 +72,16 @@ class Transformer(nn.Module):
             text_dropout=0.0,
             fusion_dropout=0.0,
             fusion_droppath=0.1,
+            global_local_fusion=False,
+            dcount=False,
+            w2net=False,
     ):
         super().__init__()
+        if dcount and w2net:
+            raise ValueError("DCount and W2NET are mutually exclusive")
+        self.global_local_fusion = global_local_fusion
+        self.dcount = dcount
+        self.w2net = w2net
         self.num_feature_levels = num_feature_levels
         self.num_encoder_layers = num_encoder_layers
         self.num_unicoder_layers = num_unicoder_layers
@@ -152,16 +160,34 @@ class Transformer(nn.Module):
         )
 
         decoder_norm = nn.LayerNorm(d_model)
-        # 创建 decoder
-        self.decoder = TransformerDecoder(
-            decoder_layer=decoder_layer,
-            num_layers=num_decoder_layers,
-            norm=decoder_norm,
-            return_intermediate=return_intermediate_dec,
-            d_model=d_model,
-            query_dim=query_dim,
-            num_feature_levels=num_feature_levels,
-        )
+        if self.w2net:
+            self.decoder = W2NetTransformerDecoder(
+                decoder_layer=decoder_layer,
+                num_layers=num_decoder_layers,
+                d_model=d_model,
+                d_ffn=dim_feedforward,
+                dropout=dropout,
+                activation=activation,
+            )
+        # DCount 使用两个参数独立、共享 reference points 的 decoder 分支。
+        elif self.dcount:
+            self.decoder = DCountTransformerDecoder(
+                decoder_layer=decoder_layer,
+                num_layers=num_decoder_layers,
+                return_intermediate=return_intermediate_dec,
+                d_model=d_model,
+                num_feature_levels=num_feature_levels,
+            )
+        else:
+            self.decoder = TransformerDecoder(
+                decoder_layer=decoder_layer,
+                num_layers=num_decoder_layers,
+                norm=decoder_norm,
+                return_intermediate=return_intermediate_dec,
+                d_model=d_model,
+                query_dim=query_dim,
+                num_feature_levels=num_feature_levels,
+            )
 
         self.d_model = d_model
         self.nhead = nhead
@@ -192,17 +218,29 @@ class Transformer(nn.Module):
         # 使用可学习参数初始化 content query
         self.embed_init_tgt = embed_init_tgt
         # 启用两阶段推理且使用可学习参数初始化 content query      或者      启用两阶段推理
-        if (two_stage_type != "no" and embed_init_tgt) or (two_stage_type == "no"):
-            # 创建 content query
+        if self.dcount or self.w2net or (two_stage_type != "no" and embed_init_tgt) or (two_stage_type == "no"):
+            # 标准模式的 learned content query；DCount/W2-Net 模式下作为主分支 query。
             self.tgt_embed = nn.Embedding(self.num_queries, d_model)
         else:
             self.tgt_embed = None
+        # DCount 的 positional query 与 semantic query 参数独立。
+        self.position_tgt_embed = (
+            nn.Embedding(self.num_queries, d_model) if self.dcount else None
+        )
+        # W2S query 与 W2C query 初值相同，但使用独立参数。
+        self.w2s_tgt_embed = (
+            nn.Embedding(self.num_queries, d_model) if self.w2net else None
+        )
 
         # for two stage
         self.two_stage_type = two_stage_type
         assert two_stage_type in ["no", "standard"], "unknown param {} of two_stage_type".format(
             two_stage_type
         )
+        if (self.dcount or self.w2net) and two_stage_type != "standard":
+            raise ValueError("DCount and W2NET require two_stage_type='standard'")
+        if (self.dcount or self.w2net) and num_patterns > 0:
+            raise ValueError("DCount and W2NET do not support query patterns")
         if two_stage_type == "standard":
             # anchor selection at the output of encoder
             # 用于进一步映射和归一化 Encoder 输出的image token
@@ -247,6 +285,12 @@ class Transformer(nn.Module):
             nn.init.normal_(self.level_embed)
         if self.tgt_embed is not None:
             nn.init.normal_(self.tgt_embed.weight)
+        if self.position_tgt_embed is not None:
+            nn.init.normal_(self.position_tgt_embed.weight)
+        # W2S query 与 W2C query 初值相同，但使用独立参数。
+        if self.w2s_tgt_embed is not None:
+            with torch.no_grad():
+                self.w2s_tgt_embed.weight.copy_(self.tgt_embed.weight)
         if self.patterns is not None:
             nn.init.normal_(self.patterns.weight)
 
@@ -386,31 +430,30 @@ class Transformer(nn.Module):
                 )
             topk_proposals = torch.topk(topk_logits, topk, dim=1)[1]  # bs, num_queries
 
-            """
-            # 按照索引大小进行排序
-            # 由于图像 token 是按照 feature level 顺序拼接的，因此较大的索引通常更可能来自后面的大视野特征层
-            # 前 10% 为 higher tokens, 后 90% 为 lower tokens
-            lower_idxes, higher_idxes = split_tokens(topk_proposals, 0.1)
-            # 取出对应的 token
-            lower_tokens = torch.gather(output_memory, 1, lower_idxes.unsqueeze(-1).expand(-1, -1, self.d_model))
-            higher_tokens = torch.gather(output_memory, 1, higher_idxes.unsqueeze(-1).expand(-1, -1, self.d_model))
+            if self.global_local_fusion:
+                # 按照索引大小进行排序
+                # 由于图像 token 是按照 feature level 顺序拼接的，因此较大的索引通常更可能来自后面的大视野特征层
+                # 前 10% 为 higher tokens, 后 90% 为 lower tokens
+                lower_idxes, higher_idxes = split_tokens(topk_proposals, 0.1)
+                # 取出对应的 token
+                lower_tokens = torch.gather(output_memory, 1, lower_idxes.unsqueeze(-1).expand(-1, -1, self.d_model))
+                higher_tokens = torch.gather(output_memory, 1, higher_idxes.unsqueeze(-1).expand(-1, -1, self.d_model))
 
-            #   lower_tokens 以 subject 文本为 Key/Value 做 cross-attention
-            #   higher_tokens 以 context 文本为 Key/Value 做 cross-attention
-            lower_tokens, higher_tokens = _apply_subject_and_context_attention(
-                self.cross_attention,
-                lower_tokens,
-                higher_tokens,
-                text_dict["encoded_text"],
-                text_dict["text_subject_mask"],
-                text_dict["text_context_mask"],
-            )
-            # lower token 会进一步吸收 higher token 中的上下文信息
-            updated_lower_tokens = self.cross_attention(lower_tokens, higher_tokens)
-            # 将更新后的 lower token 按原位置写回，higher token 不做修改
-            output_memory = output_memory.scatter(1, lower_idxes.unsqueeze(-1).expand(-1, -1, self.d_model),
-                                                  updated_lower_tokens)
-            """
+                #   lower_tokens 以 subject 文本为 Key/Value 做 cross-attention
+                #   higher_tokens 以 context 文本为 Key/Value 做 cross-attention
+                lower_tokens, higher_tokens = _apply_subject_and_context_attention(
+                    self.cross_attention,
+                    lower_tokens,
+                    higher_tokens,
+                    text_dict["encoded_text"],
+                    text_dict["text_subject_mask"],
+                    text_dict["text_context_mask"],
+                )
+                # lower token 会进一步吸收 higher token 中的上下文信息
+                updated_lower_tokens = self.cross_attention(lower_tokens, higher_tokens)
+                # 将更新后的 lower token 按原位置写回，higher token 不做修改
+                output_memory = output_memory.scatter(1, lower_idxes.unsqueeze(-1).expand(-1, -1, self.d_model),
+                                                      updated_lower_tokens)
 
             # gather boxes
             # 取出 Encoder 输出的 proposal
@@ -425,27 +468,47 @@ class Transformer(nn.Module):
             ).sigmoid()  # sigmoid
 
             # gather tgt
-            # 取出选中的 Encoder 输出的 image token，作为 content query，[bs, num_queries, c]
+            # 保留 top-k image token 供 encoder 中间输出使用。
             tgt_undetach = torch.gather(
                 output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)
             )
-            if self.embed_init_tgt:
-                # 取出可学习 content query
-                learned_tgt = (
-                    self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
-                )
-                # 归一化，加权融合，权重为可学习参数
-                tgt_ = learned_tgt + self.tgt_fusion_alpha * self.tgt_fusion_norm(tgt_undetach)
+            if self.w2net:
+                if refpoint_embed is not None or tgt is not None or attn_mask is not None:
+                    raise ValueError("W2NET does not support denoising queries")
+                # W2C/W2S 使用初值相同但参数独立的 query，并从相同粗位置开始。
+                tgt_ = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1)
+                w2s_tgt = self.w2s_tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1)
+                tgt = tgt_
+                refpoint_embed = refpoint_embed_[..., :2]
+                w2s_refpoint_embed = refpoint_embed.clone()
+            elif self.dcount:
+                if refpoint_embed is not None or tgt is not None or attn_mask is not None:
+                    raise ValueError("DCount does not support denoising queries")
+                # DCount 以两个独立的 learned query 集合初始化双分支；
+                # top-k proposal 的中心作为二者共享的二维粗 reference points。
+                tgt_ = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1)
+                position_tgt = self.position_tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1)
+                tgt = tgt_
+                refpoint_embed = refpoint_embed_[..., :2]
             else:
-                tgt_ = tgt_undetach
+                if self.embed_init_tgt:
+                    # 取出可学习 content query
+                    learned_tgt = (
+                        self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
+                    )
+                    # 归一化，加权融合，权重为可学习参数
+                    tgt_ = learned_tgt + self.tgt_fusion_alpha * self.tgt_fusion_norm(tgt_undetach)
+                else:
+                    tgt_ = tgt_undetach
+                    # tgt_ = tgt_undetach.detach()
 
-            if refpoint_embed is not None:
-                # 拼接外部输入的 refpoint_embed 和 tgt；用于 dn training
-                refpoint_embed = torch.cat([refpoint_embed, refpoint_embed_], dim=1)
-                tgt = torch.cat([tgt, tgt_], dim=1)
-            else:
-                # 当前配置，不使用外部输入的 refpoint_embed 和 tgt
-                refpoint_embed, tgt = refpoint_embed_, tgt_
+                if refpoint_embed is not None:
+                    # 拼接外部输入的 refpoint_embed 和 tgt；用于 dn training
+                    refpoint_embed = torch.cat([refpoint_embed, refpoint_embed_], dim=1)
+                    tgt = torch.cat([tgt, tgt_], dim=1)
+                else:
+                    # 当前配置，不使用外部输入的 refpoint_embed 和 tgt
+                    refpoint_embed, tgt = refpoint_embed_, tgt_
 
         elif self.two_stage_type == "no":
             # 使用可学习的 query 和 候选框
@@ -488,21 +551,54 @@ class Transformer(nn.Module):
         #########################################################
         # Begin Decoder
         #########################################################
-        hs, references = self.decoder(
-            tgt=tgt.transpose(0, 1),
-            memory=memory.transpose(0, 1),
-            memory_key_padding_mask=mask_flatten,
-            pos=lvl_pos_embed_flatten.transpose(0, 1),  # [length, batch, channel]
-            refpoints_unsigmoid=refpoint_embed.transpose(0, 1),  # [length, batch, channel]
-            level_start_index=level_start_index,
-            spatial_shapes=spatial_shapes,
-            valid_ratios=valid_ratios,
-            tgt_mask=attn_mask,
-            memory_text=text_dict["encoded_text"],
-            # we ~ the mask . False means use the token; True means pad the token
-            # 为符合 PyTorch attention 的 key_padding_mask 语义，mask 需要取反
-            text_attention_mask=~text_dict["text_token_mask"],
-        )
+        if self.w2net:
+            hs, references = self.decoder(
+                w2c_tgt=tgt.transpose(0, 1),
+                w2s_tgt=w2s_tgt.transpose(0, 1),
+                memory=memory.transpose(0, 1),
+                memory_key_padding_mask=mask_flatten,
+                w2c_refpoints_unsigmoid=refpoint_embed.transpose(0, 1),
+                w2s_refpoints_unsigmoid=w2s_refpoint_embed.transpose(0, 1),
+                level_start_index=level_start_index,
+                spatial_shapes=spatial_shapes,
+                valid_ratios=valid_ratios,
+                memory_text=text_dict["encoded_text"],
+                text_attention_mask=~text_dict["text_token_mask"],
+                text_attribute_mask=text_dict["text_attribute_mask"],
+            )
+            position_hs = None
+        elif self.dcount:
+            hs, position_hs, references = self.decoder(
+                semantic_tgt=tgt.transpose(0, 1),
+                position_tgt=position_tgt.transpose(0, 1),
+                memory=memory.transpose(0, 1),
+                memory_key_padding_mask=mask_flatten,
+                pos=lvl_pos_embed_flatten.transpose(0, 1),
+                refpoints_unsigmoid=refpoint_embed.transpose(0, 1),
+                level_start_index=level_start_index,
+                spatial_shapes=spatial_shapes,
+                valid_ratios=valid_ratios,
+                tgt_mask=attn_mask,
+                memory_text=text_dict["encoded_text"],
+                text_attention_mask=~text_dict["text_token_mask"],
+            )
+        else:
+            hs, references = self.decoder(
+                tgt=tgt.transpose(0, 1),
+                memory=memory.transpose(0, 1),
+                memory_key_padding_mask=mask_flatten,
+                pos=lvl_pos_embed_flatten.transpose(0, 1),  # [length, batch, channel]
+                refpoints_unsigmoid=refpoint_embed.transpose(0, 1),  # [length, batch, channel]
+                level_start_index=level_start_index,
+                spatial_shapes=spatial_shapes,
+                valid_ratios=valid_ratios,
+                tgt_mask=attn_mask,
+                memory_text=text_dict["encoded_text"],
+                # we ~ the mask . False means use the token; True means pad the token
+                # 为符合 PyTorch attention 的 key_padding_mask 语义，mask 需要取反
+                text_attention_mask=~text_dict["text_token_mask"],
+            )
+            position_hs = None
         #########################################################
         # End Decoder
         # hs: n_dec, bs, num_queries, d_model 每层输出的 content query
@@ -524,7 +620,7 @@ class Transformer(nn.Module):
         # ref_enc: (1, bs, num_queries, query_dim)
         #########################################################
 
-        return hs, references, hs_enc, ref_enc, init_box_proposal, img_embs, txt_embs
+        return hs, references, hs_enc, ref_enc, init_box_proposal, img_embs, txt_embs, position_hs
         # hs: (n_dec, bs, nq, d_model)
         # references: sigmoid coordinates. (n_dec+1, bs, bq, 4)
         # hs_enc: (1, bs, nq, d_model)
@@ -729,6 +825,272 @@ class TransformerEncoder(nn.Module):
                 )
 
         return output, memory_text
+
+
+class W2NetQueryFFN(nn.Module):
+    """Residual FFN used by the cross-branch query updates in W2-Net."""
+
+    def __init__(self, d_model=256, d_ffn=2048, dropout=0.0, activation="relu"):
+        super().__init__()
+        self.linear1 = nn.Linear(d_model, d_ffn)
+        self.activation = _get_activation_fn(activation, d_model=d_ffn, batch_dim=1)
+        self.dropout1 = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.linear2 = nn.Linear(d_ffn, d_model)
+        self.dropout2 = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, query):
+        with torch.amp.autocast('cuda', enabled=False):
+            update = self.linear2(self.dropout1(self.activation(self.linear1(query))))
+        return self.norm(query + self.dropout2(update))
+
+
+class W2NetTransformerDecoder(nn.Module):
+    """Decoupled what-to-count and where-to-see decoder."""
+
+    def __init__(
+            self,
+            decoder_layer,
+            num_layers,
+            d_model=256,
+            d_ffn=2048,
+            dropout=0.0,
+            activation="relu",
+    ):
+        super().__init__()
+        # ``layers`` keeps compatible W2C submodules loadable from a standard decoder checkpoint.
+        self.layers = _get_clones(decoder_layer, num_layers)
+        self.w2s_layers = _get_clones(decoder_layer, num_layers)
+        update_layer = W2NetQueryFFN(d_model, d_ffn, dropout, activation)
+        self.w2c_update_layers = _get_clones(update_layer, num_layers)
+        self.w2s_update_layers = _get_clones(update_layer, num_layers)
+        self.num_layers = num_layers
+        self.bbox_embed = None
+        self.w2s_bbox_embed = None
+        self.class_embed = None
+
+    @staticmethod
+    def _forward_branch(
+            layer,
+            query,
+            text_memory,
+            text_attention_mask,
+            reference_points,
+            memory,
+            memory_key_padding_mask,
+            level_start_index,
+            spatial_shapes,
+    ):
+        if not layer.use_text_cross_attention:
+            raise RuntimeError("W2NET requires decoder text cross-attention")
+
+        # Eq. (1)/(3): query-to-text cross-attention, without query self-attention.
+        query_update = layer.ca_text(
+            query,
+            text_memory.transpose(0, 1),
+            text_memory.transpose(0, 1),
+            key_padding_mask=text_attention_mask,
+        )[0]
+        query_update = layer.catext_dropout(query_update)
+        query = layer.catext_norm(query + query_update)
+
+        # Eq. (2)/(4): query-to-image deformable attention at branch-specific points.
+        query_update = layer.cross_attn(
+            query=query.transpose(0, 1),
+            reference_points=reference_points.transpose(0, 1).contiguous(),
+            value=memory.transpose(0, 1),
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            key_padding_mask=memory_key_padding_mask,
+        ).transpose(0, 1)
+        query = layer.norm1(query + layer.dropout1(query_update))
+        return layer.forward_ffn(query)
+
+    def forward(
+            self,
+            w2c_tgt,
+            w2s_tgt,
+            memory,
+            memory_key_padding_mask: Optional[Tensor] = None,
+            w2c_refpoints_unsigmoid: Optional[Tensor] = None,
+            w2s_refpoints_unsigmoid: Optional[Tensor] = None,
+            level_start_index: Optional[Tensor] = None,
+            spatial_shapes: Optional[Tensor] = None,
+            valid_ratios: Optional[Tensor] = None,
+            memory_text: Optional[Tensor] = None,
+            text_attention_mask: Optional[Tensor] = None,
+            text_attribute_mask: Optional[Tensor] = None,
+    ):
+        w2c_output = w2c_tgt
+        w2s_output = w2s_tgt
+        w2c_reference_points = w2c_refpoints_unsigmoid.sigmoid()
+        w2s_reference_points = w2s_refpoints_unsigmoid.sigmoid()
+        if w2c_reference_points.shape[-1] != 2 or w2s_reference_points.shape[-1] != 2:
+            raise ValueError("W2NET reference points must contain only x and y coordinates")
+        if self.bbox_embed is None or self.w2s_bbox_embed is None:
+            raise RuntimeError("W2NET decoder requires separate W2C and W2S localization heads")
+
+        w2c_intermediate = []
+        w2c_ref_points = [w2c_reference_points]
+        attribute_memory_text = memory_text * text_attribute_mask.unsqueeze(-1).to(memory_text.dtype)
+
+        for layer_id, (w2c_layer, w2s_layer) in enumerate(
+                zip(self.layers, self.w2s_layers)
+        ):
+            w2c_reference_input = (
+                    w2c_reference_points[:, :, None] * valid_ratios[None, :]
+            )
+            w2s_reference_input = (
+                    w2s_reference_points[:, :, None] * valid_ratios[None, :]
+            )
+
+            w2c_hat = self._forward_branch(
+                w2c_layer,
+                w2c_output,
+                memory_text,
+                text_attention_mask,
+                w2c_reference_input,
+                memory,
+                memory_key_padding_mask,
+                level_start_index,
+                spatial_shapes,
+            )
+            w2s_hat = self._forward_branch(
+                w2s_layer,
+                w2s_output,
+                attribute_memory_text,
+                text_attention_mask,
+                w2s_reference_input,
+                memory,
+                memory_key_padding_mask,
+                level_start_index,
+                spatial_shapes,
+            )
+
+            # Eq. (5)/(6): W2S guides W2C, while W2S remains an independent scout.
+            w2c_output = self.w2c_update_layers[layer_id](w2c_hat + w2s_hat)
+            w2s_output = self.w2s_update_layers[layer_id](w2s_hat)
+
+            w2c_delta = self.bbox_embed[layer_id](w2c_output)[..., :2]
+            w2s_delta = self.w2s_bbox_embed[layer_id](w2s_output)[..., :2]
+            new_w2c_reference_points = (
+                    w2c_delta + inverse_sigmoid(w2c_reference_points)
+            ).sigmoid()
+            new_w2s_reference_points = (
+                    w2s_delta + inverse_sigmoid(w2s_reference_points)
+            ).sigmoid()
+            w2c_reference_points = new_w2c_reference_points.detach()
+            w2s_reference_points = new_w2s_reference_points.detach()
+
+            w2c_intermediate.append(w2c_output)
+            w2c_ref_points.append(new_w2c_reference_points)
+
+        return [
+            [output.transpose(0, 1) for output in w2c_intermediate],
+            [refpoint.transpose(0, 1) for refpoint in w2c_ref_points],
+        ]
+
+
+class DCountTransformerDecoder(nn.Module):
+    """DCount decoder with decoupled semantic and positional queries."""
+
+    def __init__(
+            self,
+            decoder_layer,
+            num_layers,
+            return_intermediate=True,
+            d_model=256,
+            num_feature_levels=4,
+    ):
+        super().__init__()
+        self.semantic_layers = _get_clones(decoder_layer, num_layers)
+        self.position_layers = _get_clones(decoder_layer, num_layers)
+        self.semantic_norm = nn.LayerNorm(d_model)
+        self.position_norm = nn.LayerNorm(d_model)
+        self.dcount_ref_point_head = MLP(d_model, d_model, d_model, 2)
+        self.num_layers = num_layers
+        self.return_intermediate = return_intermediate
+        assert return_intermediate, "support return_intermediate only"
+        self.num_feature_levels = num_feature_levels
+        self.d_model = d_model
+        self.bbox_embed = None
+        self.class_embed = None
+
+    def forward(
+            self,
+            semantic_tgt,
+            position_tgt,
+            memory,
+            tgt_mask: Optional[Tensor] = None,
+            memory_mask: Optional[Tensor] = None,
+            tgt_key_padding_mask: Optional[Tensor] = None,
+            memory_key_padding_mask: Optional[Tensor] = None,
+            pos: Optional[Tensor] = None,
+            refpoints_unsigmoid: Optional[Tensor] = None,
+            level_start_index: Optional[Tensor] = None,
+            spatial_shapes: Optional[Tensor] = None,
+            valid_ratios: Optional[Tensor] = None,
+            memory_text: Optional[Tensor] = None,
+            text_attention_mask: Optional[Tensor] = None,
+    ):
+        semantic_output = semantic_tgt
+        position_output = position_tgt
+        semantic_intermediate = []
+        position_intermediate = []
+
+        reference_points = refpoints_unsigmoid.sigmoid()
+        if reference_points.shape[-1] != 2:
+            raise ValueError("DCount reference points must contain only x and y coordinates")
+        ref_points = [reference_points]
+
+        if self.bbox_embed is None:
+            raise RuntimeError("DCount decoder requires bbox_embed for reference-point updates")
+
+        for layer_id, (semantic_layer, position_layer) in enumerate(
+                zip(self.semantic_layers, self.position_layers)
+        ):
+            # 两个分支使用同一组 reference points 和位置编码，但各自学习采样 offsets。
+            reference_points_input = reference_points[:, :, None] * valid_ratios[None, :]
+            query_sine_embed = gen_sineembed_for_position(
+                reference_points_input[:, :, 0, :],
+                num_pos_feats=self.d_model // 2,
+            )
+            query_pos = self.dcount_ref_point_head(query_sine_embed)
+
+            layer_kwargs = dict(
+                tgt_query_pos=query_pos,
+                tgt_query_sine_embed=query_sine_embed,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                tgt_reference_points=reference_points_input,
+                memory_text=memory_text,
+                text_attention_mask=text_attention_mask,
+                memory=memory,
+                memory_key_padding_mask=memory_key_padding_mask,
+                memory_level_start_index=level_start_index,
+                memory_spatial_shapes=spatial_shapes,
+                memory_pos=pos,
+                self_attn_mask=tgt_mask,
+                cross_attn_mask=memory_mask,
+            )
+            semantic_output = semantic_layer(tgt=semantic_output, **layer_kwargs)
+            position_output = position_layer(tgt=position_output, **layer_kwargs)
+
+            # 仅 positional branch 更新下一层由两个分支共享的 reference points。
+            delta_xy = self.bbox_embed[layer_id](position_output)[..., :2]
+            new_reference_points = (
+                    delta_xy + inverse_sigmoid(reference_points)
+            ).sigmoid()
+            reference_points = new_reference_points.detach()
+            ref_points.append(new_reference_points)
+
+            semantic_intermediate.append(self.semantic_norm(semantic_output))
+            position_intermediate.append(self.position_norm(position_output))
+
+        return [
+            [output.transpose(0, 1) for output in semantic_intermediate],
+            [output.transpose(0, 1) for output in position_intermediate],
+            [refpoint.transpose(0, 1) for refpoint in ref_points],
+        ]
 
 
 class TransformerDecoder(nn.Module):
@@ -1089,6 +1451,9 @@ def build_transformer(args):
         text_dropout=args.text_dropout,
         fusion_dropout=args.fusion_dropout,
         fusion_droppath=args.fusion_droppath,
+        global_local_fusion=getattr(args, "global_local_fusion", False),
+        dcount=getattr(args, "DCount", False),
+        w2net=getattr(args, "W2NET", False),
     )
 
 

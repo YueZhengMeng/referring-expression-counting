@@ -183,8 +183,7 @@ echo $CUDA_HOME
 In this example, /path/to/cuda-11.3 should be replaced with the path where your CUDA toolkit is installed. You can find
 this by typing **which nvcc** in your terminal:
 
-For instance,
-if the output is /usr/local/cuda/bin/nvcc, then:
+For instance, if the output is /usr/local/cuda/bin/nvcc, then:
 
 ```bash
 export CUDA_HOME=/usr/local/cuda
