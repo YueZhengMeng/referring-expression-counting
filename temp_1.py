@@ -303,7 +303,7 @@ if __name__ == '__main__':
         '--batch_size', '--batch-size', dest='batch_size', type=int, default=1,
         help='Batch size for data loaders',
     )
-    parser.add_argument('--learning-rate', type=float, default=1e-5)
+    parser.add_argument('--learning-rate', type=float, default=2e-5)
     parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument(
         '--text_threshold', '--text-threshold', dest='text_threshold', type=float,
