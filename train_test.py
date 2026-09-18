@@ -55,7 +55,7 @@ def _caption_count(loader):
 
 
 def train(model, loader, annotations, criterion, optimizer,
-          device, epoch, text_threshold, box_threshold, token_threshold):
+          lr_scheduler, device, epoch, text_threshold, box_threshold, token_threshold):
     print('Training on train set data')
     # 设置backbone和bert为eval模式，其他需要训练的部分为train模式
     model = set_finetuning_mode(model)
@@ -121,6 +121,8 @@ def train(model, loader, annotations, criterion, optimizer,
         loss.backward()
         # 更新参数
         optimizer.step()
+        # 更新学习率
+        # lr_scheduler.step()
 
         # 筛选预测框、置信度和对应的文本
         results = threshold(
@@ -347,9 +349,9 @@ if __name__ == '__main__':
 
     if args.resume_checkpoint:
         print(f'Loading resume checkpoint: {args.resume_checkpoint}')
-        model = load_model(args.config, args.resume_checkpoint, device=device).to(device)
+        model = load_model(args.config, args.resume_checkpoint, device=device, global_local_fusion=True).to(device)
     else:
-        model = load_model(args.config, args.pretrained_checkpoint, device=device).to(device)
+        model = load_model(args.config, args.pretrained_checkpoint, device=device, global_local_fusion=True).to(device)
 
     # 冻结backbone和bert
     model = freeze_encoders(model)
@@ -389,7 +391,7 @@ if __name__ == '__main__':
     model_name = os.path.join(args.stats_dir, f'best_model.pth')
     for epoch in range(args.epochs):
         train_metrics = train(
-            model, loaders['train'], annotations, criterion, optimizer, device,
+            model, loaders['train'], annotations, criterion, optimizer, lr_scheduler, device,
             epoch, args.text_threshold, args.box_threshold, args.token_threshold,
         )
         val_metrics = eval(
@@ -431,7 +433,7 @@ if __name__ == '__main__':
 
     print(f'Inference on test set using best model: {model_name}')
     # 加载最佳模型，并设置为测试模式
-    test_model = load_model(args.config, model_name, device=device).to(device)
+    test_model = load_model(args.config, model_name, device=device, global_local_fusion=True).to(device)
     test_model = freeze_encoders(test_model)
     test_model.eval()
     # 测试集评估
