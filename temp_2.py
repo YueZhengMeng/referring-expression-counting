@@ -321,7 +321,7 @@ if __name__ == '__main__':
         '--resume-checkpoint', default=None,
         help='Checkpoint containing model weights to resume from',
     )
-    parser.add_argument('--stats_dir', default='./stats_0921')
+    parser.add_argument('--stats_dir', default='./stats_0922')
     args = parser.parse_args()
 
     # 设置随机种子
