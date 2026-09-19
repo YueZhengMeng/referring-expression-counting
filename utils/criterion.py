@@ -69,9 +69,10 @@ class HungarianMatcher(nn.Module):
                 # 等价于二分类交叉熵
                 element_cost = F.softplus(selected_logits[:, None, :]) \
                                - selected_logits[:, None, :] * selected_labels[None, :, :]
-                # 在 token 维度求平均
-                # class_cost: [Q, N]
-                class_cost = element_cost.mean(dim=-1)
+                # 除以有效 token 数求平均，class_cost: [Q, N]
+                # class_cost = element_cost.mean(dim=-1)
+                # 除以 max_text_len=256 进行归一化，class_cost: [Q, N]
+                class_cost = element_cost.sum(dim=-1) / logits.shape[-1]
 
             # 计算预测点与真实点之间的L1/曼哈顿距离
             point_cost = torch.cdist(points[batch_index], target_points, p=1)
@@ -113,6 +114,7 @@ class SetCriterion(nn.Module):
     def __init__(self, use_contrast_rec=False, contrast_rec_weight=0.06,
                  use_contrast_attr=False, contrast_attr_weight=0.06,
                  use_contrast_asd=False, contrast_asd_weight=0.015,
+                 use_contrast_img_hm=False, contrast_img_hm_weight=0.005,
                  use_contrast_img=False, contrast_img_weight=0.005,
                  cost_rep=0.2):
         super().__init__()
@@ -132,9 +134,13 @@ class SetCriterion(nn.Module):
             self.weight_dict["loss_contrast_attr"] = contrast_attr_weight
         elif self.use_contrast_asd:
             self.weight_dict["loss_contrast_asd"] = contrast_asd_weight
-        # 是否使用 C-REX 图像对比
+        # C-REX 论文/参考 README 里真正使用的目标（Hungarian 匹配引导的 SupCon）
+        self.use_contrast_img_hm = use_contrast_img_hm
+        # 是否使用 C-REX 图像对比（文本引导的版本）
         self.use_contrast_img = use_contrast_img
-        if self.use_contrast_img:
+        if self.use_contrast_img_hm:
+            self.weight_dict["loss_contrast_img_hm"] = contrast_img_hm_weight
+        elif self.use_contrast_img:
             self.weight_dict["loss_contrast_img"] = contrast_img_weight
 
     @staticmethod
@@ -175,8 +181,15 @@ class SetCriterion(nn.Module):
         element = alpha_t * ((1 - p_t) ** gamma) * element
         element = element.masked_fill(~valid_masks, 0)
 
+        # 先对 query 求平均，再对 token 求和，最后除以 caption_size
+        # 其中 caption_size = 正样本 token 数 + 2（见 utils/evaluation.py）
+        caption_sizes = torch.stack(
+            [target["caption_size"] for target in targets]
+        ).to(logits.device).clamp_min(1)
+        per_sample = element.sum(dim=(1, 2)) / (logits.shape[1] * caption_sizes)
+
         # 每个caption按query数和有效token数归一化，再对batch求平均
-        per_sample = element.sum(dim=(1, 2)) / valid_masks.sum(dim=(1, 2)).clamp_min(1)
+        # per_sample = element.sum(dim=(1, 2)) / valid_masks.sum(dim=(1, 2)).clamp_min(1)
         return {"loss_label": per_sample.mean()}
 
     def loss_point(self, outputs, targets, indices, **kwargs):
@@ -189,8 +202,14 @@ class SetCriterion(nn.Module):
                 truth.append(targets[batch_index]["points"][tgt].to(outputs["pred_points"].device))
         if not pred:
             return {"loss_point": outputs["pred_points"].sum() * 0}
+        # 分母是全 batch 的 GT 总数，而不是匹配上的预测点数
+        # （n_gt <= num_queries 时两者相等，超过 num_queries 时才有差别）
+        num_points = sum(target["points"].shape[0] for target in targets)
+        matched_pred = torch.cat(pred)
+        return {"loss_point": F.l1_loss(matched_pred, torch.cat(truth), reduction="sum") / max(num_points, 1)}
+
         # 计算L1损失并求均值
-        return {"loss_point": F.l1_loss(torch.cat(pred), torch.cat(truth), reduction="sum") / len(torch.cat(pred))}
+        # return {"loss_point": F.l1_loss(torch.cat(pred), torch.cat(truth), reduction="sum") / len(torch.cat(pred))}
 
     @staticmethod
     def _attribute_embedding(txt, mask):
@@ -322,16 +341,22 @@ class SetCriterion(nn.Module):
 
         img_embs = outputs["img_embs"]
         txt_embs = outputs["txt_embs"]
-        token_masks = outputs["text_token_mask"]
+        # token_masks = outputs["text_token_mask"]
+        # 与参考实现保持一致：文本端池化用的是 attribute token mask，
+        token_masks = outputs["attribute_token_mask"]
+        if token_masks is None:
+            return {"loss_contrast_img": img_embs.sum() * 0}
         # 每个 caption 的 GT 数量
         num_points_per_cap = torch.tensor(
             [target["points"].shape[0] for target in targets],
             device=img_embs.device,
         )
 
-        # 计算每个 image query 与 caption 平均向量的余弦相似度
+        # 计算每个 image query 与 caption 属性平均向量的余弦相似度
         txt_emb_sum = torch.sum(txt_embs * token_masks.unsqueeze(-1), dim=1)
-        txt_embs = txt_emb_sum / token_masks.sum(dim=1, keepdim=True)
+        # clamp_min(1)：参考实现的属性 mask 用 token-id 集合匹配，至少含 [CLS]/[SEP] 不会为空；
+        # 本仓库的 _role_mask 在属性文本未命中时可能全为 False，这里避免除零得到 NaN
+        txt_embs = txt_emb_sum / token_masks.sum(dim=1, keepdim=True).clamp_min(1)
         img_embs_norm = F.normalize(img_embs, p=2, dim=2)
         txt_embs_norm = F.normalize(txt_embs, p=2, dim=1)
         token_text_sim = torch.matmul(img_embs_norm, txt_embs_norm.unsqueeze(2)).squeeze(-1)
@@ -360,8 +385,7 @@ class SetCriterion(nn.Module):
         # 指数化并进行数值稳定处理
         exp_dot_tempered = (
                 torch.exp(
-                    dot_product_tempered
-                    - torch.max(dot_product_tempered, dim=2, keepdim=True)[0]
+                    dot_product_tempered- torch.max(dot_product_tempered, dim=1, keepdim=True)[0]
                 )
                 + 1e-5
         )
@@ -652,7 +676,9 @@ class SetCriterion(nn.Module):
                         outputs, targets, indices, image_group_ids=image_group_ids
                     ))
 
-                if self.use_contrast_img:
+                if self.use_contrast_img_hm:
+                    losses.update(self.loss_contrast_img_hm(outputs, targets, indices))
+                elif self.use_contrast_img:
                     losses.update(self.loss_contrast_img(outputs, targets, indices))
         # 加权求和
         weighted_losses = [

@@ -496,8 +496,9 @@ class Transformer(nn.Module):
                     learned_tgt = (
                         self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
                     )
+                    tgt_ = learned_tgt
                     # 归一化，加权融合，权重为可学习参数
-                    tgt_ = learned_tgt + self.tgt_fusion_alpha * self.tgt_fusion_norm(tgt_undetach)
+                    # tgt_ = learned_tgt + self.tgt_fusion_alpha * self.tgt_fusion_norm(tgt_undetach)
                 else:
                     tgt_ = tgt_undetach
                     # tgt_ = tgt_undetach.detach()

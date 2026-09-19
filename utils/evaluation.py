@@ -84,7 +84,9 @@ def prepare_targets(anno_b, captions, shapes, tokenizer, image_group_ids=None,
             "points": point_tensor,
             "labels": labels[row].expand(n_points, -1).clone().to(target_device),
             "valid_token_mask": valid_masks[row].to(target_device),
-            "caption_size": valid_masks[row].sum().to(target_device),
+            # 与参考实现保持一致：caption_size = 有效 token 数 + 2
+            # 为了符合原版：最后的 "." 和 "[SEP]" 也计入平均时的分母
+            "caption_size": (valid_masks[row].sum() + 2).to(target_device),
             "shape": shape,
             "image_group_id": int(image_group_ids[row]),
             "class_name": anno.get("class", ""),
