@@ -69,10 +69,8 @@ class HungarianMatcher(nn.Module):
                 # 等价于二分类交叉熵
                 element_cost = F.softplus(selected_logits[:, None, :]) \
                                - selected_logits[:, None, :] * selected_labels[None, :, :]
-                # 除以有效 token 数求平均，class_cost: [Q, N]
-                # class_cost = element_cost.mean(dim=-1)
-                # 除以 max_text_len=256 进行归一化，class_cost: [Q, N]
-                class_cost = element_cost.sum(dim=-1) / logits.shape[-1]
+                # 在有效 token 维度求平均，class_cost: [Q, N]
+                class_cost = element_cost.mean(dim=-1)
 
             # 计算预测点与真实点之间的L1/曼哈顿距离
             point_cost = torch.cdist(points[batch_index], target_points, p=1)
@@ -181,15 +179,8 @@ class SetCriterion(nn.Module):
         element = alpha_t * ((1 - p_t) ** gamma) * element
         element = element.masked_fill(~valid_masks, 0)
 
-        # 先对 query 求平均，再对 token 求和，最后除以 caption_size
-        # 其中 caption_size = 正样本 token 数 + 2（见 utils/evaluation.py）
-        caption_sizes = torch.stack(
-            [target["caption_size"] for target in targets]
-        ).to(logits.device).clamp_min(1)
-        per_sample = element.sum(dim=(1, 2)) / (logits.shape[1] * caption_sizes)
-
-        # 每个caption按query数和有效token数归一化，再对batch求平均
-        # per_sample = element.sum(dim=(1, 2)) / valid_masks.sum(dim=(1, 2)).clamp_min(1)
+        # 每个 caption 按实际参与监督的 query-token 对数归一化，再对 batch 求平均
+        per_sample = element.sum(dim=(1, 2)) / valid_masks.sum(dim=(1, 2)).clamp_min(1)
         return {"loss_label": per_sample.mean()}
 
     def loss_point(self, outputs, targets, indices, **kwargs):
@@ -202,14 +193,11 @@ class SetCriterion(nn.Module):
                 truth.append(targets[batch_index]["points"][tgt].to(outputs["pred_points"].device))
         if not pred:
             return {"loss_point": outputs["pred_points"].sum() * 0}
-        # 分母是全 batch 的 GT 总数，而不是匹配上的预测点数
-        # （n_gt <= num_queries 时两者相等，超过 num_queries 时才有差别）
-        num_points = sum(target["points"].shape[0] for target in targets)
+        # 计算所有实际匹配对象的平均 L1 定位损失
         matched_pred = torch.cat(pred)
-        return {"loss_point": F.l1_loss(matched_pred, torch.cat(truth), reduction="sum") / max(num_points, 1)}
-
-        # 计算L1损失并求均值
-        # return {"loss_point": F.l1_loss(torch.cat(pred), torch.cat(truth), reduction="sum") / len(torch.cat(pred))}
+        matched_truth = torch.cat(truth)
+        num_matches = matched_pred.shape[0]
+        return {"loss_point": F.l1_loss(matched_pred, matched_truth, reduction="sum") / max(num_matches, 1)}
 
     @staticmethod
     def _attribute_embedding(txt, mask):
@@ -377,48 +365,42 @@ class SetCriterion(nn.Module):
 
         t_ = torch.stack(idx, 0)
 
-        # 计算 query 与 query 之间的图像相似度
-        dot_product_tempered = torch.matmul(
+        # 计算 query 与 query 之间的温度缩放余弦相似度
+        logits = torch.matmul(
             img_embs_norm, img_embs_norm.permute(0, 2, 1)
         ) / temperature
 
-        # 指数化并进行数值稳定处理
-        exp_dot_tempered = (
-                torch.exp(
-                    dot_product_tempered- torch.max(dot_product_tempered, dim=1, keepdim=True)[0]
-                )
-                + 1e-5
+        # 对每个 anchor，从分母中去掉其自身
+        num_queries = logits.shape[-1]
+        self_mask = torch.eye(
+            num_queries, device=img_embs.device, dtype=torch.bool
+        ).unsqueeze(0)
+        log_denominator = torch.logsumexp(
+            logits.masked_fill(self_mask, float("-inf")),
+            dim=-1,
         )
 
-        # 去除 query 与自身的相似度
-        mask_anchor_out = 1 - torch.eye(
-            exp_dot_tempered.shape[1], device=img_embs.device
-        )
-        exp_msk_me = exp_dot_tempered * mask_anchor_out
-
-        # 计算每个 anchor 的总相似度分母
-        d_ = torch.sum(exp_msk_me, dim=1)
+        # 对每个 anchor，只在文本相似度选出的正 query 上计算分子，并排除自身
+        positive_mask = t_.to(dtype=torch.bool).unsqueeze(1).expand(-1, num_queries, -1)
+        positive_mask = positive_mask & ~self_mask
+        positive_logits = logits.masked_fill(~positive_mask, float("-inf"))
+        positive_logsumexp = torch.logsumexp(positive_logits, dim=-1)
 
         ll = []
         for i in range(token_text_sim.shape[0]):
-            # 取出所有正样本 anchor 的分母
-            denom = torch.gather(d_[i], 0, t_n[i])
-            # 只保留与正样本 query 的相似度，与负 query 的相似度清零
-            numm = torch.sum(exp_msk_me[i] * t_[i].unsqueeze(0), dim=1)
-            # 取出所有正样本 anchor 的分子
-            numm = torch.gather(numm, 0, t_n[i])
-            # 计算损失
-            l = numm / denom
-            if num_points_per_cap[i] < 2:
-                # 两个正样本损失为 0
-                l = torch.tensor(0.0, device=img_embs.device)
-            else:
-                # 对于一个正样本 anchor，除去自己后，理论上还有多少个正样本
-                l = -torch.log(l / (num_points_per_cap[i] - 1))
-            # caption 求平均
-            l = torch.mean(l)
+            num_positives = t_n[i].numel()
+            if num_positives < 2:
+                # 一个正样本无法构成正样本对
+                ll.append(logits[i].sum() * 0)
+                continue
 
-            ll.append(l)
+            # -log(mean positive probability)
+            anchor_log_denominator = torch.gather(log_denominator[i], 0, t_n[i])
+            anchor_positive_logsumexp = torch.gather(positive_logsumexp[i], 0, t_n[i])
+            normalizer = torch.log(img_embs.new_tensor(float(num_positives - 1)))
+            ll.append(
+                (anchor_log_denominator - anchor_positive_logsumexp + normalizer).mean()
+            )
 
         loss = torch.stack(ll).mean()
 
@@ -460,9 +442,11 @@ class SetCriterion(nn.Module):
             anchor_rows = torch.arange(src.numel(), device=img_embs.device)
             self_mask = torch.zeros_like(logits, dtype=torch.bool)
             self_mask[anchor_rows, src] = True
-            logits = logits.masked_fill(self_mask, float("-inf"))
             # log-sum-exp：计算每个 anchor 的除自身外所有 query 的 log 概率和
-            denominator = torch.logsumexp(logits, dim=1)
+            log_denominator = torch.logsumexp(
+                logits.masked_fill(self_mask, float("-inf")),
+                dim=-1,
+            )
 
             # All other matched queries are positives; unmatched queries are negatives.
             # Negative tokens are not pulled toward each other.
@@ -472,12 +456,12 @@ class SetCriterion(nn.Module):
             positive_mask &= ~self_mask
             # 负样本不聚合
             positive_logits = logits.masked_fill(~positive_mask, float("-inf"))
-            positive_logsumexp = torch.logsumexp(positive_logits, dim=1)
+            positive_logsumexp = torch.logsumexp(positive_logits, dim=-1)
 
             # Eq. (2): -log(mean positive probability).
             # 按每个 anchor 的正样本数量求平均
             normalizer = torch.log(img_embs.new_tensor(float(src.numel() - 1)))
-            terms.append((denominator - positive_logsumexp + normalizer).mean())
+            terms.append((log_denominator - positive_logsumexp + normalizer).mean())
 
         if not terms:
             return {"loss_contrast_img_hm": img_embs.sum() * 0}

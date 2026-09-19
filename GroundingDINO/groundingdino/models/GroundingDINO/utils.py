@@ -139,7 +139,7 @@ class RandomBoxPerturber:
 
 
 def sigmoid_focal_loss(
-        inputs, targets, caption_size=None, num_boxes=None, alpha: float = 0.25, gamma: float = 2, no_reduction=False
+        inputs, targets, num_boxes=None, alpha: float = 0.25, gamma: float = 2, no_reduction=False
 ):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
@@ -167,11 +167,7 @@ def sigmoid_focal_loss(
 
     if no_reduction:
         return loss
-    else:
-        total_token = inputs.shape[-1]
-        loss_mean = loss.mean() * total_token / caption_size
-
-        return loss_mean
+    return loss.mean()
 
 
 class MLP(nn.Module):
