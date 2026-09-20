@@ -983,7 +983,7 @@ class W2NetTransformerDecoder(nn.Module):
                 w2s_layer,
                 w2s_output,
                 attribute_memory_text,
-                text_attention_mask,
+                w2s_text_attention_mask,
                 w2s_reference_input,
                 memory,
                 memory_key_padding_mask,
@@ -1006,7 +1006,7 @@ class W2NetTransformerDecoder(nn.Module):
             # W2C 沿用 DETR 的逐层 detach；W2S 保留 reference-update 计算图，
             # 让后续层的融合损失能够训练其独立 localization head。
             w2c_reference_points = new_w2c_reference_points.detach()
-            w2s_reference_points = new_w2s_reference_points
+            w2s_reference_points = new_w2s_reference_points.detach()
 
             w2c_intermediate.append(w2c_output)
             w2c_ref_points.append(new_w2c_reference_points)
