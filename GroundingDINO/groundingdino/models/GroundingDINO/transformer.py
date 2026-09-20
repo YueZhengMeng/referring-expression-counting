@@ -862,7 +862,7 @@ class W2NetTransformerDecoder(nn.Module):
         # 方案 A（当前启用）：W2C/W2S 复用同一组 decoder layer 参数。
         self.layers = _get_clones(decoder_layer, num_layers)
         # 方案 B（保留作消融）：W2S 使用一套参数独立的 decoder layers。
-        # self.w2s_layers = _get_clones(decoder_layer, num_layers)
+        self.w2s_layers = _get_clones(decoder_layer, num_layers)
         update_layer = W2NetQueryFFN(d_model, d_ffn, dropout, activation)
         self.w2c_update_layers = _get_clones(update_layer, num_layers)
         self.w2s_update_layers = _get_clones(update_layer, num_layers)
@@ -938,7 +938,7 @@ class W2NetTransformerDecoder(nn.Module):
         # W2S 只允许关注 attribute tokens
         # text_attribute_mask 和 valid_text_mask 与运算 是额外保护，非必要
         valid_text_mask = (~text_attention_mask if text_attention_mask is not None
-            else torch.ones_like(text_attribute_mask, dtype=torch.bool))
+                           else torch.ones_like(text_attribute_mask, dtype=torch.bool))
         effective_attribute_mask = text_attribute_mask.to(torch.bool) & valid_text_mask
         # 找出没有任何 attribute token 的样本
         empty_attribute_rows = ~effective_attribute_mask.any(dim=1)
@@ -953,14 +953,14 @@ class W2NetTransformerDecoder(nn.Module):
         w2s_text_attention_mask = ~effective_attribute_mask
 
         # 方案 A（当前启用）：两条流在每层调用同一个 decoder layer，共享参数。
-        for layer_id, shared_layer in enumerate(self.layers):
-            w2c_layer = shared_layer
-            w2s_layer = shared_layer
+        # for layer_id, shared_layer in enumerate(self.layers):
+        #     w2c_layer = shared_layer
+        #     w2s_layer = shared_layer
 
-            # 方案 B（保留作消融）：两条流使用参数独立的 decoder layers。
-            # for layer_id, (w2c_layer, w2s_layer) in enumerate(
-            #         zip(self.layers, self.w2s_layers)
-            # ):
+        # 方案 B（保留作消融）：两条流使用参数独立的 decoder layers。
+        for layer_id, (w2c_layer, w2s_layer) in enumerate(
+                zip(self.layers, self.w2s_layers)
+        ):
             w2c_reference_input = (
                     w2c_reference_points[:, :, None] * valid_ratios[None, :]
             )
