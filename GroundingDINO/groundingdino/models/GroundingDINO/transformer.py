@@ -859,9 +859,10 @@ class W2NetTransformerDecoder(nn.Module):
             activation="relu",
     ):
         super().__init__()
-        # ``layers`` keeps compatible W2C submodules loadable from a standard decoder checkpoint.
+        # 方案 A（当前启用）：W2C/W2S 复用同一组 decoder layer 参数。
         self.layers = _get_clones(decoder_layer, num_layers)
-        self.w2s_layers = _get_clones(decoder_layer, num_layers)
+        # 方案 B（保留作消融）：W2S 使用一套参数独立的 decoder layers。
+        # self.w2s_layers = _get_clones(decoder_layer, num_layers)
         update_layer = W2NetQueryFFN(d_model, d_ffn, dropout, activation)
         self.w2c_update_layers = _get_clones(update_layer, num_layers)
         self.w2s_update_layers = _get_clones(update_layer, num_layers)
@@ -933,11 +934,33 @@ class W2NetTransformerDecoder(nn.Module):
 
         w2c_intermediate = []
         w2c_ref_points = [w2c_reference_points]
-        attribute_memory_text = memory_text * text_attribute_mask.unsqueeze(-1).to(memory_text.dtype)
 
-        for layer_id, (w2c_layer, w2s_layer) in enumerate(
-                zip(self.layers, self.w2s_layers)
-        ):
+        # W2S 只允许关注 attribute tokens
+        # text_attribute_mask 和 valid_text_mask 与运算 是额外保护，非必要
+        valid_text_mask = (~text_attention_mask if text_attention_mask is not None
+            else torch.ones_like(text_attribute_mask, dtype=torch.bool))
+        effective_attribute_mask = text_attribute_mask.to(torch.bool) & valid_text_mask
+        # 找出没有任何 attribute token 的样本
+        empty_attribute_rows = ~effective_attribute_mask.any(dim=1)
+        # 若某一行没有任何 attribute token，则退回完整有效文本
+        effective_attribute_mask = torch.where(
+            empty_attribute_rows[:, None],
+            valid_text_mask,
+            effective_attribute_mask,
+        )
+        # 非属性 token 的文本置为0（额外保护，非必要）
+        attribute_memory_text = memory_text * effective_attribute_mask.unsqueeze(-1).to(memory_text.dtype)
+        w2s_text_attention_mask = ~effective_attribute_mask
+
+        # 方案 A（当前启用）：两条流在每层调用同一个 decoder layer，共享参数。
+        for layer_id, shared_layer in enumerate(self.layers):
+            w2c_layer = shared_layer
+            w2s_layer = shared_layer
+
+            # 方案 B（保留作消融）：两条流使用参数独立的 decoder layers。
+            # for layer_id, (w2c_layer, w2s_layer) in enumerate(
+            #         zip(self.layers, self.w2s_layers)
+            # ):
             w2c_reference_input = (
                     w2c_reference_points[:, :, None] * valid_ratios[None, :]
             )
@@ -960,7 +983,7 @@ class W2NetTransformerDecoder(nn.Module):
                 w2s_layer,
                 w2s_output,
                 attribute_memory_text,
-                text_attention_mask,
+                w2s_text_attention_mask,
                 w2s_reference_input,
                 memory,
                 memory_key_padding_mask,
@@ -980,8 +1003,10 @@ class W2NetTransformerDecoder(nn.Module):
             new_w2s_reference_points = (
                     w2s_delta + inverse_sigmoid(w2s_reference_points)
             ).sigmoid()
+            # W2C 沿用 DETR 的逐层 detach；W2S 保留 reference-update 计算图，
+            # 让后续层的融合损失能够训练其独立 localization head。
             w2c_reference_points = new_w2c_reference_points.detach()
-            w2s_reference_points = new_w2s_reference_points.detach()
+            w2s_reference_points = new_w2s_reference_points
 
             w2c_intermediate.append(w2c_output)
             w2c_ref_points.append(new_w2c_reference_points)
