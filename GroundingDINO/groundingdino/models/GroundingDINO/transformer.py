@@ -953,14 +953,14 @@ class W2NetTransformerDecoder(nn.Module):
         w2s_text_attention_mask = ~effective_attribute_mask
 
         # 方案 A（当前启用）：两条流在每层调用同一个 decoder layer，共享参数。
-        # for layer_id, shared_layer in enumerate(self.layers):
-        #     w2c_layer = shared_layer
-        #     w2s_layer = shared_layer
+        for layer_id, shared_layer in enumerate(self.layers):
+            w2c_layer = shared_layer
+            w2s_layer = shared_layer
 
-        # 方案 B（保留作消融）：两条流使用参数独立的 decoder layers。
-        for layer_id, (w2c_layer, w2s_layer) in enumerate(
-                zip(self.layers, self.w2s_layers)
-        ):
+            # 方案 B（保留作消融）：两条流使用参数独立的 decoder layers。
+            # for layer_id, (w2c_layer, w2s_layer) in enumerate(
+            #         zip(self.layers, self.w2s_layers)
+            # ):
             w2c_reference_input = (
                     w2c_reference_points[:, :, None] * valid_ratios[None, :]
             )
@@ -983,7 +983,7 @@ class W2NetTransformerDecoder(nn.Module):
                 w2s_layer,
                 w2s_output,
                 attribute_memory_text,
-                w2s_text_attention_mask,
+                text_attention_mask,
                 w2s_reference_input,
                 memory,
                 memory_key_padding_mask,
