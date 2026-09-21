@@ -952,15 +952,15 @@ class W2NetTransformerDecoder(nn.Module):
         attribute_memory_text = memory_text * effective_attribute_mask.unsqueeze(-1).to(memory_text.dtype)
         w2s_text_attention_mask = ~effective_attribute_mask
 
-        # 方案 A（当前启用）：两条流在每层调用同一个 decoder layer，共享参数。
-        for layer_id, shared_layer in enumerate(self.layers):
-            w2c_layer = shared_layer
-            w2s_layer = shared_layer
+        # 方案 A（保留作消融）：两条流在每层调用同一个 decoder layer，共享参数。
+        # for layer_id, shared_layer in enumerate(self.layers):
+        #     w2c_layer = shared_layer
+        #     w2s_layer = shared_layer
 
-            # 方案 B（保留作消融）：两条流使用参数独立的 decoder layers。
-            # for layer_id, (w2c_layer, w2s_layer) in enumerate(
-            #         zip(self.layers, self.w2s_layers)
-            # ):
+        # 方案 B（当前启用）：两条流使用参数独立的 decoder layers。
+        for layer_id, (w2c_layer, w2s_layer) in enumerate(
+                zip(self.layers, self.w2s_layers)
+        ):
             w2c_reference_input = (
                     w2c_reference_points[:, :, None] * valid_ratios[None, :]
             )
@@ -1006,7 +1006,7 @@ class W2NetTransformerDecoder(nn.Module):
             # W2C 沿用 DETR 的逐层 detach；W2S 保留 reference-update 计算图，
             # 让后续层的融合损失能够训练其独立 localization head。
             w2c_reference_points = new_w2c_reference_points.detach()
-            w2s_reference_points = new_w2s_reference_points.detach()
+            w2s_reference_points = new_w2s_reference_points
 
             w2c_intermediate.append(w2c_output)
             w2c_ref_points.append(new_w2c_reference_points)
