@@ -325,7 +325,7 @@ if __name__ == '__main__':
         '--resume-checkpoint', default=None,
         help='Checkpoint containing model weights to resume from',
     )
-    parser.add_argument('--stats_dir', default='./stats_0925')
+    parser.add_argument('--stats_dir', default='./stats_0924')
     args = parser.parse_args()
 
     # 设置随机种子
@@ -349,9 +349,9 @@ if __name__ == '__main__':
 
     if args.resume_checkpoint:
         print(f'Loading resume checkpoint: {args.resume_checkpoint}')
-        model = load_model(args.config, args.resume_checkpoint, device=device, global_local_fusion=False).to(device)
+        model = load_model(args.config, args.resume_checkpoint, device=device, global_local_fusion=True).to(device)
     else:
-        model = load_model(args.config, args.pretrained_checkpoint, device=device, global_local_fusion=False).to(device)
+        model = load_model(args.config, args.pretrained_checkpoint, device=device, global_local_fusion=True).to(device)
 
     # 冻结backbone和bert
     model = freeze_encoders(model)
@@ -433,7 +433,7 @@ if __name__ == '__main__':
 
     print(f'Inference on test set using best model: {model_name}')
     # 加载最佳模型，并设置为测试模式
-    test_model = load_model(args.config, model_name, device=device, global_local_fusion=False).to(device)
+    test_model = load_model(args.config, model_name, device=device, global_local_fusion=True).to(device)
     test_model = freeze_encoders(test_model)
     test_model.eval()
     # 测试集评估
