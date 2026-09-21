@@ -116,9 +116,9 @@ class SetCriterion(nn.Module):
                  use_contrast_img=False, contrast_img_weight=0.005,
                  cost_rep=0.2):
         super().__init__()
-        self.matcher = HungarianMatcher(cost_class=5, cost_point=1, cost_rep=cost_rep)
+        self.matcher = HungarianMatcher(cost_class=0.1, cost_point=1, cost_rep=cost_rep)
         self.losses = ["labels", "points", "contrast"]
-        self.weight_dict = {"loss_label": 5, "loss_point": 1}
+        self.weight_dict = {"loss_label": 3, "loss_point": 1}
 
         # 三种 text 对比最多只选一种
         if sum(map(bool, (use_contrast_rec, use_contrast_asd, use_contrast_attr))) > 1:
