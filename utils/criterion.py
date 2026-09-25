@@ -4,6 +4,18 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
 
+def _mean_tensors(values):
+    if not values:
+        return None
+    return float(torch.cat(values).float().mean().item())
+
+
+def _ratio(numerator, denominator):
+    if numerator is None or denominator is None or abs(denominator) < 1e-12:
+        return None
+    return numerator / denominator
+
+
 class HungarianMatcher(nn.Module):
     def __init__(self, cost_class=5.0, cost_point=1.0, cost_rep=0.2, **kwargs):
         super().__init__()
@@ -14,17 +26,39 @@ class HungarianMatcher(nn.Module):
             raise ValueError("cost_rep must be non-negative")
         if cost_class == 0 and cost_point == 0 and cost_rep == 0:
             raise ValueError("all matching costs cannot be zero")
+        self.last_diagnostics = {}
 
     @torch.no_grad()  # 匈牙利匹配不可微，不需要计算梯度
     def forward(self, outputs, targets):
         logits = outputs["pred_logits"]
         points = outputs["pred_points"]
         indices = []
+        valid_token_counts = []
+        class_cost_values = []
+        point_cost_values = []
+        repulsive_cost_values = []
+        weighted_class_cost_values = []
+        weighted_point_cost_values = []
+        weighted_repulsive_cost_values = []
+        matched_class_cost_values = []
+        matched_point_cost_values = []
+        matched_repulsive_cost_values = []
+        target_count = 0
+        empty_target_count = 0
         for batch_index, target in enumerate(targets):
             # 取出每个target的 真实点集合 与 有效token标签
             target_points = target["points"].to(points.device)
             target_labels = target["labels"].to(logits.device)
             n_targets = target_points.shape[0]
+            target_count += int(n_targets)
+            empty_target_count += int(n_targets == 0)
+            valid = target.get("valid_token_mask")
+            if valid is None:
+                valid = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
+            valid = valid.to(device=logits.device, dtype=torch.bool)
+            if valid.ndim != 1 or valid.numel() != logits.shape[-1]:
+                raise ValueError("valid_token_mask must have shape [T]")
+            valid_token_counts.append(int(valid.sum().item()))
             empty = torch.empty(0, dtype=torch.int64, device=logits.device)
             if n_targets == 0:
                 indices.append((empty, empty.clone()))
@@ -46,12 +80,6 @@ class HungarianMatcher(nn.Module):
                     negative_points = target_points.new_empty((0, target_points.shape[-1]))
 
             # 取出有效token集合，默认全为True
-            valid = target.get("valid_token_mask")
-            if valid is None:
-                valid = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
-            valid = valid.to(device=logits.device, dtype=torch.bool)
-            if valid.ndim != 1 or valid.numel() != logits.shape[-1]:
-                raise ValueError("valid_token_mask must have shape [T]")
             if not valid.any():
                 # 没有有效token，则class_cost为0
                 class_cost = logits[batch_index].new_zeros((logits.shape[1], n_targets))
@@ -96,15 +124,69 @@ class HungarianMatcher(nn.Module):
                 # C_rep(p_hat_i, p_j) = exp(-R)
                 repulsive_cost = torch.exp(-ambiguity_ratio)
 
+            class_cost_values.append(class_cost.detach().reshape(-1))
+            point_cost_values.append(point_cost.detach().reshape(-1))
+            repulsive_cost_values.append(repulsive_cost.detach().reshape(-1))
+            weighted_class_cost_values.append((self.cost_class * class_cost).detach().reshape(-1))
+            weighted_point_cost_values.append((self.cost_point * point_cost).detach().reshape(-1))
+            weighted_repulsive_cost_values.append((self.cost_rep * repulsive_cost).detach().reshape(-1))
+
             # 总成本 = 类别成本 + 点成本 + SSM repulsive cost
             cost = self.cost_class * class_cost + self.cost_point * point_cost + self.cost_rep * repulsive_cost
 
             # 匈牙利算法求解最优匹配，返回源点和目标点对应的索引
             src, tgt = linear_sum_assignment(cost.detach().cpu().numpy())
+            if src.size:
+                src_tensor = torch.as_tensor(src, dtype=torch.long, device=logits.device)
+                tgt_tensor = torch.as_tensor(tgt, dtype=torch.long, device=logits.device)
+                matched_class_cost_values.append(class_cost[src_tensor, tgt_tensor].detach())
+                matched_point_cost_values.append(point_cost[src_tensor, tgt_tensor].detach())
+                matched_repulsive_cost_values.append(repulsive_cost[src_tensor, tgt_tensor].detach())
             indices.append((
                 torch.as_tensor(src, dtype=torch.int64, device=logits.device),
                 torch.as_tensor(tgt, dtype=torch.int64, device=logits.device),
             ))
+        class_cost_mean = _mean_tensors(class_cost_values)
+        point_cost_mean = _mean_tensors(point_cost_values)
+        weighted_class_cost_mean = _mean_tensors(weighted_class_cost_values)
+        weighted_point_cost_mean = _mean_tensors(weighted_point_cost_values)
+        self.last_diagnostics = {
+            "valid_token_mean": (
+                sum(valid_token_counts) / len(valid_token_counts)
+                if valid_token_counts else None
+            ),
+            "valid_token_min": min(valid_token_counts) if valid_token_counts else None,
+            "valid_token_max": max(valid_token_counts) if valid_token_counts else None,
+            "target_count_total": target_count,
+            "empty_target_count": empty_target_count,
+            "matched_count_total": sum(src.numel() for src, _ in indices),
+            "class_cost_mean": class_cost_mean,
+            "point_cost_mean": point_cost_mean,
+            "repulsive_cost_mean": _mean_tensors(repulsive_cost_values),
+            "weighted_class_cost_mean": weighted_class_cost_mean,
+            "weighted_point_cost_mean": weighted_point_cost_mean,
+            "weighted_repulsive_cost_mean": _mean_tensors(weighted_repulsive_cost_values),
+            "matched_class_cost_mean": _mean_tensors(matched_class_cost_values),
+            "matched_point_cost_mean": _mean_tensors(matched_point_cost_values),
+            "matched_repulsive_cost_mean": _mean_tensors(matched_repulsive_cost_values),
+            "total_cost_mean": sum(
+                value for value in (
+                    weighted_class_cost_mean,
+                    weighted_point_cost_mean,
+                    _mean_tensors(weighted_repulsive_cost_values),
+                ) if value is not None
+            ),
+            "matched_total_cost_mean": sum(
+                value for value in (
+                    _mean_tensors(matched_class_cost_values),
+                    _mean_tensors(matched_point_cost_values),
+                    _mean_tensors(matched_repulsive_cost_values),
+                ) if value is not None
+            ),
+            "class_point_cost_ratio": _ratio(
+                weighted_class_cost_mean, weighted_point_cost_mean
+            ),
+        }
         return indices
 
 
@@ -114,13 +196,27 @@ class SetCriterion(nn.Module):
                  use_contrast_asd=False, contrast_asd_weight=0.015,
                  use_contrast_img_hm=False, contrast_img_hm_weight=0.005,
                  use_contrast_img=False, contrast_img_weight=0.005,
+                 cost_class=5.0, cost_point=1.0, loss_label_weight=5.0,
                  cost_rep=0.2):
         super().__init__()
-        self.matcher = HungarianMatcher(cost_class=5, cost_point=1, cost_rep=cost_rep)
+        self.cost_class = float(cost_class)
+        self.cost_point = float(cost_point)
+        self.loss_label_weight = float(loss_label_weight)
+        self.cost_rep = float(cost_rep)
+        if self.cost_class < 0 or self.cost_point < 0 or self.loss_label_weight < 0:
+            raise ValueError("matching and loss weights must be non-negative")
+        self.matcher = HungarianMatcher(
+            cost_class=self.cost_class,
+            cost_point=self.cost_point,
+            cost_rep=self.cost_rep,
+        )
         self.losses = ["labels", "points", "contrast"]
-        self.weight_dict = {"loss_label": 5, "loss_point": 1}
-
-        # 三种 text 对比最多只选一种
+        self.weight_dict = {
+            "loss_label": self.loss_label_weight,
+            "loss_point": 1.0,
+        }
+        # Populated after each forward pass for optional training diagnostics.
+        self.last_loss_breakdown = {}
         if sum(map(bool, (use_contrast_rec, use_contrast_asd, use_contrast_attr))) > 1:
             raise ValueError("only one text contrast can be used")
         self.use_contrast_rec = use_contrast_rec
@@ -670,5 +766,23 @@ class SetCriterion(nn.Module):
             for key in losses
             if key in self.weight_dict
         ]
+        self.last_loss_breakdown = {
+            key: value.detach()
+            for key, value in losses.items()
+        }
+        self.last_loss_breakdown.update({
+            f"weighted_{key}": (losses[key] * self.weight_dict[key]).detach()
+            for key in losses
+            if key in self.weight_dict
+        })
+        for key in (
+            "loss_contrast_rec", "loss_contrast_attr", "loss_contrast_asd",
+            "loss_contrast_img_hm", "loss_contrast_img",
+        ):
+            if key not in self.last_loss_breakdown:
+                zero = next(iter(losses.values())).detach() * 0
+                self.last_loss_breakdown[key] = zero
+                self.last_loss_breakdown[f"weighted_{key}"] = zero
         loss = torch.sum(torch.stack(weighted_losses))
+        self.last_loss_breakdown["total"] = loss.detach()
         return loss

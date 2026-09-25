@@ -14,6 +14,11 @@ from utils.criterion import SetCriterion
 from utils.evaluation import seed_everything, calc_loc_metric, prepare_targets
 from utils.image_loader import get_loader
 from utils.processor import DataProcessor
+from utils.run_metadata import format_loss_stats, update_loss_stats, write_run_metadata
+from utils.diagnostics import (
+    DiagnosticsWriter, EpochAccumulator, batch_record,
+    collect_prediction_batch, gradient_norms,
+)
 
 
 def freeze_encoders(model):
@@ -55,7 +60,8 @@ def _caption_count(loader):
 
 
 def train(model, loader, annotations, criterion, optimizer,
-          lr_scheduler, device, epoch, text_threshold, box_threshold, token_threshold):
+          lr_scheduler, device, epoch, text_threshold, box_threshold, token_threshold,
+          diagnostics_writer=None):
     print('Training on train set data')
     # 设置backbone和bert为eval模式，其他需要训练的部分为train模式
     model = set_finetuning_mode(model)
@@ -67,8 +73,14 @@ def train(model, loader, annotations, criterion, optimizer,
     train_fn = 0
     counter = 0
     train_size = _caption_count(loader)
+    loss_stats = {}
+    loss_steps = 0
+    signed_count_error = 0
+    predicted_count_total = 0
+    epoch_diagnostics = EpochAccumulator()
+    split_name = "train"
 
-    for images, captions, shapes, img_caps in tqdm(loader):
+    for batch_index, (images, captions, shapes, img_caps) in enumerate(tqdm(loader)):
         # Keep the image-to-caption relation before flattening the batch.
         # 每个caption对应的image的id
         image_group_ids = [
@@ -117,8 +129,12 @@ def train(model, loader, annotations, criterion, optimizer,
 
         # 计算损失
         loss = criterion(outputs, targets, image_group_ids)
+        update_loss_stats(loss_stats, criterion)
+        loss_steps += 1
+        current_lr = optimizer.param_groups[0]["lr"]
         # 反向传播
         loss.backward()
+        gradient_summary = gradient_norms(model)
         # 更新参数
         optimizer.step()
         # 更新学习率
@@ -131,6 +147,25 @@ def train(model, loader, annotations, criterion, optimizer,
             box_threshold=box_threshold,
             token_threshold=token_threshold,
         )
+        epoch_diagnostics.add_loss(criterion)
+        epoch_diagnostics.add_matcher(criterion)
+        epoch_diagnostics.add_lr(current_lr)
+        batch_summary = collect_prediction_batch(
+            results, targets, calc_loc_metric, epoch, split_name, batch_index,
+            image_ids=img_caps, image_group_ids=image_group_ids,
+        )
+        epoch_diagnostics.add_prediction(batch_summary)
+        if diagnostics_writer:
+            diagnostics_writer.write_batch(
+                batch_record(
+                    epoch, split_name, batch_index,
+                    epoch * len(loader) + batch_index if split_name == "train" else None,
+                    current_lr, batch_summary, criterion, gradient_summary,
+                )
+            )
+            for caption_record in batch_summary["caption_rows"]:
+                diagnostics_writer.write_caption(caption_record)
+
         for b, (boxes, logits, phrases) in enumerate(results):
             # 计算计数指标
             boxes = [box.tolist() for box in boxes]
@@ -141,6 +176,8 @@ def train(model, loader, annotations, criterion, optimizer,
             cnt_err = abs(pred_cnt - gt_cnt)
             train_mae += cnt_err
             train_rmse += cnt_err ** 2
+            signed_count_error += pred_cnt - gt_cnt
+            predicted_count_total += pred_cnt
 
             # 计算分类指标
             TP, FP, FN, precision, recall, f1 = calc_loc_metric(
@@ -160,13 +197,24 @@ def train(model, loader, annotations, criterion, optimizer,
                 f'recall = {recall:.2f}, F1 = {f1:.2f}'
             )
             """
+    if diagnostics_writer:
+        diagnostics_writer.write_epoch(
+            epoch_diagnostics.epoch_record(epoch, "train")
+        )
+    if counter:
+        print(
+            f"[train] count_mean={predicted_count_total / counter:.4f}, "
+            f"signed_error={signed_count_error / counter:.4f}"
+        )
+    print(f"[train] {format_loss_stats(loss_stats, loss_steps)}")
     return _finalize_metrics(
         train_mae, train_rmse, train_tp, train_fp, train_fn, counter
     )
 
 
 def eval(model, loader, annotations, criterion, split, device, text_threshold,
-         box_threshold, token_threshold, epoch=None):
+         box_threshold, token_threshold, epoch=None, diagnostics_writer=None,
+         is_final=False):
     print(f'Evaluation on {split} set')
     # 设置整个模型为eval模式
     model.eval()
@@ -178,8 +226,12 @@ def eval(model, loader, annotations, criterion, split, device, text_threshold,
     eval_fn = 0
     counter = 0
     eval_size = _caption_count(loader)
+    epoch_diagnostics = EpochAccumulator()
+    split_name = split
+    current_lr = None
+    gradient_summary = None
 
-    for images, captions, shapes, img_caps in tqdm(loader):
+    for batch_index, (images, captions, shapes, img_caps) in enumerate(tqdm(loader)):
         # Keep the image-to-caption relation before flattening the batch.
         # 每个caption对应的image的id
         image_group_ids = [
@@ -264,6 +316,10 @@ def eval(model, loader, annotations, criterion, split, device, text_threshold,
                 f'recall = {recall:.2f}, F1 = {f1:.2f}'
             )
             """
+    if diagnostics_writer:
+        diagnostics_writer.write_epoch(
+            epoch_diagnostics.epoch_record(epoch, split, is_final=is_final)
+        )
     return _finalize_metrics(
         eval_mae, eval_rmse, eval_tp, eval_fp, eval_fn, counter
     )
@@ -304,6 +360,8 @@ if __name__ == '__main__':
         help='Batch size for data loaders',
     )
     parser.add_argument('--learning-rate', type=float, default=1e-5)
+    parser.add_argument('--cost-class', '--cost_class', dest='cost_class', type=float, default=0.1)
+    parser.add_argument('--loss-label-weight', '--loss_label_weight', dest='loss_label_weight', type=float, default=3.0)
     parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument(
         '--text_threshold', '--text-threshold', dest='text_threshold', type=float,
@@ -322,6 +380,10 @@ if __name__ == '__main__':
         help='Checkpoint containing model weights to resume from',
     )
     parser.add_argument('--stats_dir', default='./stats_0909-5')
+    parser.add_argument(
+        '--diagnostics-level', '--diagnostics_level', dest='diagnostics_level',
+        choices=['off', 'epoch', 'batch', 'caption'], default='batch',
+    )
     args = parser.parse_args()
 
     # 设置随机种子
@@ -352,7 +414,15 @@ if __name__ == '__main__':
     # 冻结backbone和bert
     model = freeze_encoders(model)
     # 损失函数
-    criterion = SetCriterion(cost_rep=0)
+    criterion = SetCriterion(
+        cost_class=args.cost_class,
+        loss_label_weight=args.loss_label_weight,
+        cost_rep=0,
+    )
+    print(
+        f"Criterion: cost_class={args.cost_class}, "
+        f"loss_label={args.loss_label_weight}, cost_rep=0"
+    )
     # 优化器
     optimizer = torch.optim.AdamW(
         trainable_parameters(model),
@@ -369,6 +439,8 @@ if __name__ == '__main__':
                               anneal_strategy='linear', pct_start=0.1, div_factor=25.0, final_div_factor=10000.0)
 
     os.makedirs(args.stats_dir, exist_ok=True)
+    write_run_metadata(args.stats_dir, args, criterion)
+    diagnostics_writer = DiagnosticsWriter(args.stats_dir, args.diagnostics_level)
     stats_file = os.path.join(args.stats_dir, 'stats.csv')
     print(f'Saving stats to {stats_file}')
     header = [
@@ -390,14 +462,17 @@ if __name__ == '__main__':
         train_metrics = train(
             model, loaders['train'], annotations, criterion, optimizer, lr_scheduler, device,
             epoch, args.text_threshold, args.box_threshold, args.token_threshold,
+            diagnostics_writer,
         )
         val_metrics = eval(
             model, loaders['val'], annotations, criterion, 'val', device,
             args.text_threshold, args.box_threshold, args.token_threshold, epoch,
+            diagnostics_writer=diagnostics_writer,
         )
         test_metrics = eval(
             model, loaders['test'], annotations, criterion, 'test', device,
             args.text_threshold, args.box_threshold, args.token_threshold, epoch,
+            diagnostics_writer=diagnostics_writer,
         )
         val_mae = val_metrics[0]
 
@@ -433,6 +508,7 @@ if __name__ == '__main__':
     test_metrics = eval(
         test_model, loaders['test'], annotations, criterion, 'test', device,
         args.text_threshold, args.box_threshold, args.token_threshold, -1,
+        diagnostics_writer=diagnostics_writer, is_final=True,
     )
     test_mae, test_rmse, test_TP, test_FP, test_FN, test_precision, test_recall, test_f1 = test_metrics
     print(
@@ -444,3 +520,4 @@ if __name__ == '__main__':
         stats_file,
         [0] * 8 + ['||'] + [0] * 8 + ['||'] + list(test_metrics),
     )
+    diagnostics_writer.close()
