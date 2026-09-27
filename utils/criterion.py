@@ -196,12 +196,13 @@ class SetCriterion(nn.Module):
                  use_contrast_asd=False, contrast_asd_weight=0.015,
                  use_contrast_img_hm=False, contrast_img_hm_weight=0.005,
                  use_contrast_img=False, contrast_img_weight=0.005,
-                 cost_class=5.0, cost_point=1.0, loss_label_weight=5.0,
-                 cost_rep=0.2):
+                 cost_class=5.0, cost_point=1.0, cost_rep=0.2,
+                 loss_label_weight=5.0, loss_point_weight=1.0):
         super().__init__()
         self.cost_class = float(cost_class)
         self.cost_point = float(cost_point)
         self.loss_label_weight = float(loss_label_weight)
+        self.loss_point_weight = float(loss_point_weight)
         self.cost_rep = float(cost_rep)
         if self.cost_class < 0 or self.cost_point < 0 or self.loss_label_weight < 0:
             raise ValueError("matching and loss weights must be non-negative")
@@ -213,7 +214,7 @@ class SetCriterion(nn.Module):
         self.losses = ["labels", "points", "contrast"]
         self.weight_dict = {
             "loss_label": self.loss_label_weight,
-            "loss_point": 1.0,
+            "loss_point": self.loss_point_weight,
         }
         # Populated after each forward pass for optional training diagnostics.
         self.last_loss_breakdown = {}
@@ -776,8 +777,8 @@ class SetCriterion(nn.Module):
             if key in self.weight_dict
         })
         for key in (
-            "loss_contrast_rec", "loss_contrast_attr", "loss_contrast_asd",
-            "loss_contrast_img_hm", "loss_contrast_img",
+                "loss_contrast_rec", "loss_contrast_attr", "loss_contrast_asd",
+                "loss_contrast_img_hm", "loss_contrast_img",
         ):
             if key not in self.last_loss_breakdown:
                 zero = next(iter(losses.values())).detach() * 0

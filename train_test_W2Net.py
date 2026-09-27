@@ -286,6 +286,22 @@ def eval(model, loader, annotations, criterion, split, device, text_threshold,
             box_threshold=box_threshold,
             token_threshold=token_threshold,
         )
+        epoch_diagnostics.add_loss(criterion)
+        epoch_diagnostics.add_matcher(criterion)
+        batch_summary = collect_prediction_batch(
+            results, targets, calc_loc_metric, epoch, split_name, batch_index,
+            image_ids=img_caps, image_group_ids=image_group_ids,
+        )
+        epoch_diagnostics.add_prediction(batch_summary)
+        if diagnostics_writer:
+            diagnostics_writer.write_batch(
+                batch_record(
+                    epoch, split_name, batch_index, None, None,
+                    batch_summary, criterion,
+                )
+            )
+            for caption_record in batch_summary["caption_rows"]:
+                diagnostics_writer.write_caption(caption_record)
 
         for b, (boxes, logits, phrases) in enumerate(results):
             # 计算计数指标
