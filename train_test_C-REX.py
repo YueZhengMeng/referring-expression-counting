@@ -377,7 +377,9 @@ if __name__ == '__main__':
     )
     parser.add_argument('--learning-rate', type=float, default=1e-5)
     parser.add_argument('--cost-class', '--cost_class', dest='cost_class', type=float, default=0.1)
+    parser.add_argument('--cost-point', '--cost_point', dest='cost_point', type=float, default=1.0)
     parser.add_argument('--loss-label-weight', '--loss_label_weight', dest='loss_label_weight', type=float, default=3.0)
+    parser.add_argument('--loss-point-weight', '--loss_point_weight', dest='loss_point_weight', type=float, default=1.0)
     parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument(
         '--scheduler', choices=['plateau', 'steplr'], default='plateau',
@@ -437,7 +439,9 @@ if __name__ == '__main__':
     criterion = SetCriterion(
         use_contrast_img_hm=True,
         cost_class=args.cost_class,
+        cost_point=args.cost_point,
         loss_label_weight=args.loss_label_weight,
+        loss_point_weight=args.loss_point_weight,
         cost_rep=0,
     )
     print(

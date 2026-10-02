@@ -17,7 +17,7 @@ from utils.processor import DataProcessor
 from utils.run_metadata import format_loss_stats, update_loss_stats, write_run_metadata
 from utils.diagnostics import (
     DiagnosticsWriter, EpochAccumulator, batch_record,
-    collect_prediction_batch, gradient_norms,
+    collect_prediction_batch, gradient_norms, attribute_token_stats,
 )
 
 
@@ -119,6 +119,7 @@ def train(model, loader, annotations, criterion, optimizer,
 
         # 只保留中心点，放弃bbox的宽和高
         outputs['pred_points'] = outputs['pred_boxes'][:, :, :2]
+        branch_stats = attribute_token_stats(outputs)
 
         # 整理为适合损失函数的格式
         targets = prepare_targets(
@@ -149,6 +150,7 @@ def train(model, loader, annotations, criterion, optimizer,
         )
         epoch_diagnostics.add_loss(criterion)
         epoch_diagnostics.add_matcher(criterion)
+        epoch_diagnostics.add_branch(branch_stats)
         epoch_diagnostics.add_lr(current_lr)
         batch_summary = collect_prediction_batch(
             results, targets, calc_loc_metric, epoch, split_name, batch_index,
@@ -161,6 +163,7 @@ def train(model, loader, annotations, criterion, optimizer,
                     epoch, split_name, batch_index,
                     epoch * len(loader) + batch_index if split_name == "train" else None,
                     current_lr, batch_summary, criterion, gradient_summary,
+                    extra=branch_stats,
                 )
             )
             for caption_record in batch_summary["caption_rows"]:
@@ -268,6 +271,7 @@ def eval(model, loader, annotations, criterion, split, device, text_threshold,
 
         # 只保留中心点，放弃bbox的宽和高
         outputs['pred_points'] = outputs['pred_boxes'][:, :, :2]
+        branch_stats = attribute_token_stats(outputs)
 
         # 整理为适合损失函数的格式
         targets = prepare_targets(
@@ -288,6 +292,7 @@ def eval(model, loader, annotations, criterion, split, device, text_threshold,
         )
         epoch_diagnostics.add_loss(criterion)
         epoch_diagnostics.add_matcher(criterion)
+        epoch_diagnostics.add_branch(branch_stats)
         batch_summary = collect_prediction_batch(
             results, targets, calc_loc_metric, epoch, split_name, batch_index,
             image_ids=img_caps, image_group_ids=image_group_ids,
@@ -297,7 +302,7 @@ def eval(model, loader, annotations, criterion, split, device, text_threshold,
             diagnostics_writer.write_batch(
                 batch_record(
                     epoch, split_name, batch_index, None, None,
-                    batch_summary, criterion,
+                    batch_summary, criterion, extra=branch_stats,
                 )
             )
             for caption_record in batch_summary["caption_rows"]:
@@ -377,7 +382,9 @@ if __name__ == '__main__':
     )
     parser.add_argument('--learning-rate', type=float, default=1e-5)
     parser.add_argument('--cost-class', '--cost_class', dest='cost_class', type=float, default=5.0)
+    parser.add_argument('--cost-point', '--cost_point', dest='cost_point', type=float, default=1.0)
     parser.add_argument('--loss-label-weight', '--loss_label_weight', dest='loss_label_weight', type=float, default=5.0)
+    parser.add_argument('--loss-point-weight', '--loss_point_weight', dest='loss_point_weight', type=float, default=1.0)
     parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument(
         '--text_threshold', '--text-threshold', dest='text_threshold', type=float,
@@ -432,7 +439,9 @@ if __name__ == '__main__':
     # 损失函数
     criterion = SetCriterion(
         cost_class=args.cost_class,
+        cost_point=args.cost_point,
         loss_label_weight=args.loss_label_weight,
+        loss_point_weight=args.loss_point_weight,
         cost_rep=0.2,
     )
     print(

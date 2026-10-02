@@ -2,7 +2,6 @@ import csv
 import math
 from pathlib import Path
 
-
 _LEVELS = {"off": 0, "epoch": 1, "batch": 2, "caption": 3}
 
 _EPOCH_FIELDS = [
@@ -11,6 +10,8 @@ _EPOCH_FIELDS = [
     "mean_signed_count_error", "mae", "rmse", "under_count_rate",
     "over_count_rate", "exact_count_rate", "within_one_rate", "tp", "fp",
     "fn", "precision", "recall", "f1", "lr_mean", "lr_min", "lr_max",
+    "attribute_token_mean", "attribute_token_min", "attribute_token_max",
+    "empty_attribute_rate",
     "loss_label", "loss_point", "loss_contrast_rec", "loss_contrast_attr",
     "loss_contrast_asd", "loss_contrast_img_hm", "loss_contrast_img",
     "weighted_loss_label", "weighted_loss_point", "weighted_loss_contrast_rec",
@@ -29,9 +30,13 @@ _BATCH_FIELDS = [
     "epoch", "split", "batch", "optimizer_step", "caption_count",
     "gt_count_total", "pred_count_total", "signed_count_error_total",
     "mae_sum", "rmse_sum", "tp", "fp", "fn", "lr", "grad_norm_total",
-    "grad_norm_class", "grad_norm_point", "grad_norm_contrast", "loss_label",
-    "loss_point", "loss_contrast_rec", "loss_contrast_attr", "loss_contrast_asd",
-    "loss_contrast_img_hm", "loss_contrast_img", "weighted_loss_label",
+    "grad_norm_class", "grad_norm_point", "grad_norm_contrast",
+    "grad_norm_w2c_layers", "grad_norm_w2s_layers", "grad_norm_w2c_update",
+    "grad_norm_w2s_update", "grad_norm_w2c_bbox", "grad_norm_w2s_bbox",
+    "grad_norm_w2c_total", "grad_norm_w2s_total", "attribute_token_mean",
+    "attribute_token_min", "attribute_token_max", "empty_attribute_rate",
+    "loss_label", "loss_point", "loss_contrast_rec", "loss_contrast_attr",
+    "loss_contrast_asd", "loss_contrast_img_hm", "loss_contrast_img", "weighted_loss_label",
     "weighted_loss_point", "weighted_loss_contrast_rec",
     "weighted_loss_contrast_attr", "weighted_loss_contrast_asd",
     "weighted_loss_contrast_img_hm", "weighted_loss_contrast_img", "total_loss",
@@ -150,14 +155,21 @@ def _matcher_values(criterion):
 
 
 def gradient_norms(model):
-    """Return total and coarse head gradient norms after loss.backward()."""
-    groups = {"total": [], "class": [], "point": [], "contrast": []}
+    """Return total, head, and optional W2Net branch gradient norms."""
+    groups = {
+        "total": [], "class": [], "point": [], "contrast": [],
+        "w2c_layers": [], "w2s_layers": [],
+        "w2c_update": [], "w2s_update": [],
+        "w2c_bbox": [], "w2s_bbox": [],
+        "w2c_total": [], "w2s_total": [],
+    }
     for name, parameter in model.named_parameters():
         if parameter.grad is None:
             continue
         norm = parameter.grad.detach().float().norm(2)
         groups["total"].append(norm)
         lowered = name.lower()
+        is_w2s = "w2s" in lowered
         if "class_embed" in lowered or "logit" in lowered:
             groups["class"].append(norm)
         if "bbox_embed" in lowered or "w2s_bbox" in lowered:
@@ -165,13 +177,53 @@ def gradient_norms(model):
         if any(token in lowered for token in ("fusion", "img_emb", "txt_emb", "contrast")):
             groups["contrast"].append(norm)
 
+        if "w2s_layers" in lowered:
+            groups["w2s_layers"].append(norm)
+            groups["w2s_total"].append(norm)
+        elif "w2c_update_layers" in lowered:
+            groups["w2c_update"].append(norm)
+            groups["w2c_total"].append(norm)
+        elif "w2s_update_layers" in lowered:
+            groups["w2s_update"].append(norm)
+            groups["w2s_total"].append(norm)
+        elif "w2s_bbox_embed" in lowered:
+            groups["w2s_bbox"].append(norm)
+            groups["w2s_total"].append(norm)
+        elif "decoder.layers" in lowered and not is_w2s:
+            groups["w2c_layers"].append(norm)
+            groups["w2c_total"].append(norm)
+        elif "bbox_embed" in lowered and not is_w2s:
+            groups["w2c_bbox"].append(norm)
+            groups["w2c_total"].append(norm)
+
     result = {}
     for name, values in groups.items():
-        if values:
-            result[f"grad_norm_{name}"] = float(torch_stack_norm(values))
-        else:
-            result[f"grad_norm_{name}"] = None
+        result[f"grad_norm_{name}"] = (
+            float(torch_stack_norm(values)) if values else None
+        )
     return result
+
+
+def attribute_token_stats(outputs):
+    """Summarize W2Net's attribute-token input without retaining graph tensors."""
+    mask = outputs.get("attribute_token_mask")
+    fields = {
+        "attribute_token_mean": None,
+        "attribute_token_min": None,
+        "attribute_token_max": None,
+        "empty_attribute_rate": None,
+    }
+    if mask is None or mask.numel() == 0:
+        return fields
+    import torch
+    counts = mask.detach().to(dtype=torch.float32).sum(dim=-1)
+    fields.update({
+        "attribute_token_mean": float(counts.mean().item()),
+        "attribute_token_min": float(counts.min().item()),
+        "attribute_token_max": float(counts.max().item()),
+        "empty_attribute_rate": float((counts == 0).float().mean().item()),
+    })
+    return fields
 
 
 def torch_stack_norm(values):
@@ -264,6 +316,8 @@ class EpochAccumulator:
             "empty_target_count": 0,
             "matched_count_total": 0,
         }
+        self.branch_sums = {}
+        self.branch_steps = 0
         self.loss_steps = 0
         self.matcher_steps = 0
         self.lrs = []
@@ -287,6 +341,15 @@ class EpochAccumulator:
             else:
                 self.matcher_sums[key] = self.matcher_sums.get(key, 0.0) + value
         self.matcher_steps += 1
+
+    def add_branch(self, branch_stats):
+        added = False
+        for key, value in branch_stats.items():
+            if value is not None:
+                self.branch_sums[key] = self.branch_sums.get(key, 0.0) + value
+                added = True
+        if added:
+            self.branch_steps += 1
 
     def add_lr(self, lr):
         if lr is not None:
@@ -328,6 +391,7 @@ class EpochAccumulator:
         record.update(self.means(self.loss_sums, self.loss_steps))
         record.update(self.means(self.matcher_sums, self.matcher_steps))
         record.update(self.matcher_totals)
+        record.update(self.means(self.branch_sums, self.branch_steps))
         record["matched_per_target"] = (
             record.get("matched_count_total", 0.0) / record.get("target_count_total", 1.0)
             if record.get("target_count_total", 0.0) else None
@@ -336,7 +400,7 @@ class EpochAccumulator:
 
 
 def batch_record(epoch, split, batch_index, optimizer_step, lr, summary,
-                 criterion, gradient=None):
+                 criterion, gradient=None, extra=None):
     record = {
         "epoch": epoch,
         "split": split,
@@ -361,4 +425,6 @@ def batch_record(epoch, split, batch_index, optimizer_step, lr, summary,
     record.update(_matcher_values(criterion))
     if gradient:
         record.update(gradient)
+    if extra:
+        record.update(extra)
     return record
