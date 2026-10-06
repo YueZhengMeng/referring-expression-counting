@@ -397,7 +397,7 @@ if __name__ == '__main__':
         '--resume-checkpoint', default=None,
         help='Checkpoint containing model weights to resume from',
     )
-    parser.add_argument('--stats_dir', default='./stats_0909-5')
+    parser.add_argument('--stats_dir', default='./stats')
     parser.add_argument(
         '--diagnostics-level', '--diagnostics_level', dest='diagnostics_level',
         choices=['off', 'epoch', 'batch', 'caption'], default='batch',
@@ -425,14 +425,15 @@ if __name__ == '__main__':
 
     if args.resume_checkpoint:
         print(f'Loading resume checkpoint: {args.resume_checkpoint}')
-        model = load_model(args.config, args.resume_checkpoint, device=device).to(device)
+        model = load_model(args.config, args.resume_checkpoint, device=device, global_local_fusion=True).to(device)
     else:
-        model = load_model(args.config, args.pretrained_checkpoint, device=device).to(device)
+        model = load_model(args.config, args.pretrained_checkpoint, device=device, global_local_fusion=True).to(device)
 
     # 冻结backbone和bert
     model = freeze_encoders(model)
     # 损失函数
     criterion = SetCriterion(
+        use_contrast_rec=True,
         cost_class=args.cost_class,
         cost_point=args.cost_point,
         loss_label_weight=args.loss_label_weight,
@@ -521,7 +522,7 @@ if __name__ == '__main__':
 
     print(f'Inference on test set using best model: {model_name}')
     # 加载最佳模型，并设置为测试模式
-    test_model = load_model(args.config, model_name, device=device).to(device)
+    test_model = load_model(args.config, model_name, device=device, global_local_fusion=True).to(device)
     test_model = freeze_encoders(test_model)
     test_model.eval()
     # 测试集评估

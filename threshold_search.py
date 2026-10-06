@@ -20,6 +20,14 @@ from utils.processor import DataProcessor
 
 DEFAULT_BOX_THRESHOLDS = [round(value, 2) for value in torch.arange(0.10, 0.501, 0.05).tolist()]
 DEFAULT_TOKEN_THRESHOLDS = [round(value, 2) for value in torch.arange(0.1, 0.501, 0.05).tolist()]
+MODEL_KWARGS = {
+    "groundingdino": {},
+    "groundingrec": {"global_local_fusion": True},
+    "crex_groundingrec": {"global_local_fusion": True},
+    "crex_groundingdino": {},
+    "dcount": {"DCount": True},
+    "w2net": {"W2NET": True},
+}
 
 
 class MetricAccumulator:
@@ -102,13 +110,10 @@ def freeze_encoders(model):
 
 
 def load_model_for_variant(model_name, config, checkpoint, device):
-    kwargs = {}
-    if model_name == "crex":
-        kwargs["global_local_fusion"] = True
-    elif model_name == "dcount":
-        kwargs["DCount"] = True
-    elif model_name == "w2net":
-        kwargs["W2NET"] = True
+    try:
+        kwargs = MODEL_KWARGS[model_name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown model variant: {model_name}") from exc
     model = load_model(config, checkpoint, device=device, **kwargs).to(device)
     model = freeze_encoders(model)
     model.eval()
@@ -316,7 +321,7 @@ def main():
         description="Search post-training box/token thresholds on validation data"
     )
     parser.add_argument(
-        "--model", choices=["rec", "crex", "dcount", "w2net"], required=True,
+        "--model", choices=list(MODEL_KWARGS), required=True,
     )
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument(
