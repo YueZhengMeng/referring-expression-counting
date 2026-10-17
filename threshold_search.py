@@ -311,10 +311,12 @@ def write_rows(path, rows):
         writer.writeheader()
         writer.writerows({field: row.get(field) for field in fields} for row in rows)
 
+
 def json_default(obj):
     if hasattr(obj, "item"):
         return obj.item()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 
 def main():
     parser = argparse.ArgumentParser(

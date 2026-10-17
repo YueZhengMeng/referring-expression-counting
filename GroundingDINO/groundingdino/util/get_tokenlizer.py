@@ -18,7 +18,7 @@ def get_tokenlizer(text_encoder_type):
             )
     print("final text_encoder_type: {}".format(text_encoder_type))
 
-    tokenizer = AutoTokenizer.from_pretrained(text_encoder_type,use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(text_encoder_type, use_fast=True)
     if not tokenizer.is_fast:
         raise ValueError("GroundingREC requires a fast tokenizer for offset mapping.")
 

@@ -165,17 +165,12 @@ cython_debug/
 
 .claude
 
-/case_study_output
-
-temp.ipynb
-
 2024_CVPR_Referring Expression Counting.pdf
+2025_CVPR_CAD-GD_supplementary.pdf
+2025_CVPR_Exploring Contextual Attribute Density in Referring Expression Counting.pdf
 2025_MM_DCount Decoupled Spatial Perception and Attribute Discrimination for Referring Expression Counting.pdf
 2026_AAAI_Decoupling What to Count and Where to See for Referring Expression Counting.pdf
 2026_ECCV_What is the Right Embedding Space for Contrastive Learning in Referring Expression Counting.pdf
-
-GroundingREC_C-REX
-
-/tmp
+2027_Pattern Recognition_CountLEG Compositional referring expression counting framework via .pdf
 
 exp
